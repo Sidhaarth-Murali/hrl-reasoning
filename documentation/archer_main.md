@@ -6,15 +6,13 @@
 
 ### 1. Foundational Reinforcement Learning
 
-The goal in RL is to learn a policy \( \pi \) that maximizes expected cumulative discounted rewards:
+The goal in RL is to learn a policy $\pi$ that maximizes expected cumulative discounted rewards:
 
-\[
-J(\pi) = \mathbb{E}_{\tau \sim \pi} \left[ \sum_{t=0}^{T} \gamma^t r_t \right]
-\]
+$$J(\pi) = \mathbb{E}_{\tau \sim \pi} \left[ \sum_{t=0}^T \gamma^t r_t \right]$$
 
-- \( \tau \): trajectory  
-- \( \gamma \): discount factor  
-- \( r_t \): reward at time \( t \)
+- $\tau$: trajectory  
+- $\gamma$: discount factor  
+- $r_t$: reward at time $t$
 
 ---
 
@@ -22,19 +20,19 @@ J(\pi) = \mathbb{E}_{\tau \sim \pi} \left[ \sum_{t=0}^{T} \gamma^t r_t \right]
 
 ArCHer uses a two-part architecture:
 
-- **Actor (Policy)**: \( \pi_\theta(a \mid s) \), a language model  
-- **Critic (Value Estimator)**: with parameters \( \phi \)
+- **Actor (Policy)**: $\pi_\theta(a|s)$, a language model  
+- **Critic (Value Estimator)**: with parameters $\phi$
 
 It estimates:
 
-- State Value: \( V_\phi(s) \)  
-- Action Value: \( Q_\phi(s, a) \)
+- State Value: $V_\phi(s)$  
+- Action Value: $Q_\phi(s, a)$
 
 **Double Critic Setup**:
 To reduce overestimation:
 
-- \( Q_{\phi_1}(s, a), Q_{\phi_2}(s, a) \)  
-- \( V_{\phi_1}(s), V_{\phi_2}(s) \)
+- $Q_{\phi_1}(s, a), Q_{\phi_2}(s, a)$  
+- $V_{\phi_1}(s), V_{\phi_2}(s)$
 
 ---
 
@@ -42,20 +40,14 @@ To reduce overestimation:
 
 #### Critic Loss:
 
-\[
-L_{\text{critic}}(\phi) = L_{Q_1} + L_{Q_2} + L_{V_1} + L_{V_2}
-\]
+$$L_{\text{critic}}(\phi) = L_{Q_1} + L_{Q_2} + L_{V_1} + L_{V_2}$$
 
 - Q-value losses:
-\[
-L_{Q_i} = \mathbb{E}_{(s, a, r, s') \sim D} \left[ \left( Q_{\phi_i}(s, a) - \left( r + \gamma V_{\phi_i'}(s') \right) \right)^2 \right]
-\]
+$$L_{Q_i} = \mathbb{E}_{(s, a, r, s') \sim D} \left[ \left( Q_{\phi_i}(s, a) - \left( r + \gamma V_{\phi_i'}(s') \right) \right)^2 \right]$$
 
 - V-value losses:
-\[
-L_{V_i} = \mathbb{E}_{s \sim D} \left[ \left( V_{\phi_i}(s) - Q_{\phi_i}(s, a') \right)^2 \right]
-\]
-Where \( a' \sim \pi_\theta(\cdot \mid s) \)
+$$L_{V_i} = \mathbb{E}_{s \sim D} \left[ \left( V_{\phi_i}(s) - Q_{\phi_i}(s, a') \right)^2 \right]$$
+Where $a' \sim \pi_\theta(\cdot|s)$
 
 **Code Reference:**
 ```python
@@ -67,15 +59,11 @@ v2_loss = self.criterion(v2, target_q2)
 
 #### Actor Loss:
 
-\[
-L_{\text{actor}}(\theta) = - \mathbb{E}_{s, a \sim \pi_\theta} \left[ \log \pi_\theta(a \mid s) \cdot A(s, a) \right]
-\]
+$$L_{\text{actor}}(\theta) = - \mathbb{E}_{s, a \sim \pi_\theta} \left[ \log \pi_\theta(a|s) \cdot A(s, a) \right]$$
 
 Where advantage is:
 
-\[
-A(s,a) = \min(Q_{\phi_1}(s,a), Q_{\phi_2}(s,a)) - \min(V_{\phi_1}(s), V_{\phi_2}(s))
-\]
+$$A(s,a) = \min(Q_{\phi_1}(s,a), Q_{\phi_2}(s,a)) - \min(V_{\phi_1}(s), V_{\phi_2}(s))$$
 
 **Code Reference:**
 ```python
@@ -106,9 +94,7 @@ if isinstance(log_prob, Tuple):
 #### Target Network Update:
 Soft update using Polyak averaging:
 
-\[
-\phi'_{\text{target}} \leftarrow \tau \phi + (1 - \tau) \phi'_{\text{target}}
-\]
+$$\phi'_{\text{target}} \leftarrow \tau \phi + (1 - \tau) \phi'_{\text{target}}$$
 
 ```python
 for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
@@ -116,8 +102,8 @@ for target_param, param in zip(self.target_critic.parameters(), self.critic.para
 ```
 
 #### Statistics Tracked:
-- Mean, min, max, std for: \( Q, V, A \)
-- Loss values: \( L_{Q_i}, L_{V_i}, L_{\text{actor}} \)
+- Mean, min, max, std for: $Q, V, A$
+- Loss values: $L_{Q_i}, L_{V_i}, L_{\text{actor}}$
 
 Used for:
 - Stability tracking
@@ -133,10 +119,10 @@ Used for:
 | Step | Description |
 |------|-------------|
 | 1 | Actor generates: "Is it an animal?" |
-| 2 | Env responds: "Yes.", \( r = -1 \), done = False |
-| 3 | Critic evaluates:<br> \( Q_1 = 0.25, Q_2 = 0.30 \)<br> \( V_1 = 0.15, V_2 = 0.20 \)<br> Next: "Does it have fur?"<br> Target Qs: 0.45, 0.50<br> \( \text{Target V}_1 = -0.685 \), \( \text{Target V}_2 = -0.640 \)<br> Losses:<br> Q₁ loss = 0.874, Q₂ loss = 0.884<br> V₁ loss = 0.090, V₂ loss = 0.090<br> Total: **1.938** |
+| 2 | Env responds: "Yes.", $r = -1$, done = False |
+| 3 | Critic evaluates:<br> $Q_1 = 0.25, Q_2 = 0.30$<br> $V_1 = 0.15, V_2 = 0.20$<br> Next: "Does it have fur?"<br> Target Qs: 0.45, 0.50<br> $\text{Target V}_1 = -0.685$, $\text{Target V}_2 = -0.640$<br> Losses:<br> Q₁ loss = 0.874, Q₂ loss = 0.884<br> V₁ loss = 0.090, V₂ loss = 0.090<br> Total: **1.938** |
 | 4 | Actor log prob: −2.3<br> Advantage: 0.10<br> PG loss: 0.23 |
-| 5 | Target Update with \( \tau = 0.1 \) |
+| 5 | Target Update with $\tau = 0.1$ |
 
 ---
 
@@ -144,10 +130,10 @@ Used for:
 
 | Concept | Code |
 |--------|------|
-| State \( s \) | `obs_ids = tokenizer(observation)` |
-| Action \( a \sim \pi_\theta \) | `model.generate(**obs_ids)` |
-| Log Prob \( \log \pi_\theta(a \mid s) \) | `log_prob = torch.sum(log(...))` |
-| Advantage \( A(s,a) \) | `advantages = q - v` |
+| State $s$ | `obs_ids = tokenizer(observation)` |
+| Action $a \sim \pi_\theta$ | `model.generate(**obs_ids)` |
+| Log Prob $\log \pi_\theta(a|s)$ | `log_prob = torch.sum(log(...))` |
+| Advantage $A(s,a)$ | `advantages = q - v` |
 | Backpropagation | `accelerator.backward(...)` |
 | Stats | `return {"q1.mean": ..., "v1.std": ...}` |
 
