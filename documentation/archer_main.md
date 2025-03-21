@@ -43,22 +43,11 @@ To reduce overestimation:
 $$L_{\text{critic}}(\phi) = L_{Q_1} + L_{Q_2} + L_{V_1} + L_{V_2}$$
 
 - Q-value losses:
-```md
-$$
-L_{Q_i} = \mathbb{E}_{(s, a, r, s') \sim D} \left[
-  \Bigl(Q_{\phi_i}(s, a) - \bigl(r + \gamma \, V_{\phi_i'}(s')\bigr)\Bigr)^2
-\right]
-$$
+$$L_{Q_i} = \mathbb{E}_{(s, a, r, s') \sim D} \left[ \left( Q_{\phi_i}(s, a) - \left( r + \gamma V_{\phi_i'}(s') \right) \right)^2 \right]$$
 
 - V-value losses:
-$$
-L_{V_i} = \mathbb{E}_{s \sim D} \left[
-  \Bigl(V_{\phi_i}(s) - Q_{\phi_i}(s, a')\Bigr)^2
-\right]
-$$
-
-Where \(a' \sim \pi_\theta(\cdot \mid s)\)
-
+$$L_{V_i} = \mathbb{E}_{s \sim D} \left[ \left( V_{\phi_i}(s) - Q_{\phi_i}(s, a') \right)^2 \right]$$
+Where $a' \sim \pi_\theta(\cdot | s)$
 
 **Code Reference:**
 ```python
@@ -70,11 +59,7 @@ v2_loss = self.criterion(v2, target_q2)
 
 #### Actor Loss:
 
-$$
-L_{\text{actor}}(\theta) = - \mathbb{E}_{s, a \sim \pi_\theta} \bigl[
-  \log \pi_\theta(a \mid s) \cdot A(s, a)
-\bigr]
-$$
+$$L_{\text{actor}}(\theta) = - \mathbb{E}_{s, a \sim \pi_\theta} \left[ \log \pi_\theta(a|s) \cdot A(s, a) \right]$$
 
 Where advantage is:
 
@@ -109,10 +94,7 @@ if isinstance(log_prob, Tuple):
 #### Target Network Update:
 Soft update using Polyak averaging:
 
-$$
-\phi'_{\text{target}} \;\leftarrow\; \tau \,\phi \;+\; (1 - \tau)\,\phi'_{\text{target}}
-$$
-
+$$\phi'_{\text{target}} \leftarrow \tau \phi + (1 - \tau) \phi'_{\text{target}}$$
 
 ```python
 for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
