@@ -31,8 +31,8 @@ It estimates:
 **Double Critic Setup**:
 To reduce overestimation:
 
-- $Q_{\phi_1}(s, a), Q_{\phi_2}(s, a)$  
-- $V_{\phi_1}(s), V_{\phi_2}(s)$
+- $Q_{\phi_1}(s, a)$, $Q_{\phi_2}(s, a)$  
+- $V_{\phi_1}(s)$, $V_{\phi_2}(s)$
 
 ---
 
@@ -102,8 +102,8 @@ for target_param, param in zip(self.target_critic.parameters(), self.critic.para
 ```
 
 #### Statistics Tracked:
-- Mean, min, max, std for: $Q, V, A$
-- Loss values: $L_{Q_i}, L_{V_i}, L_{\text{actor}}$
+- Mean, min, max, std for: $Q$, $V$, $A$
+- Loss values: $L_{Q_i}$, $L_{V_i}$, $L_{\text{actor}}$
 
 Used for:
 - Stability tracking
@@ -120,8 +120,8 @@ Used for:
 |------|-------------|
 | 1 | Actor generates: "Is it an animal?" |
 | 2 | Env responds: "Yes.", $r = -1$, done = False |
-| 3 | Critic evaluates:<br> $Q_1 = 0.25, Q_2 = 0.30$<br> $V_1 = 0.15, V_2 = 0.20$<br> Next: "Does it have fur?"<br> Target Qs: 0.45, 0.50<br> $\text{Target V}_1 = -0.685$, $\text{Target V}_2 = -0.640$<br> Losses:<br> Q₁ loss = 0.874, Q₂ loss = 0.884<br> V₁ loss = 0.090, V₂ loss = 0.090<br> Total: **1.938** |
-| 4 | Actor log prob: −2.3<br> Advantage: 0.10<br> PG loss: 0.23 |
+| 3 | Critic evaluates:<br> $Q_1 = 0.25$, $Q_2 = 0.30$<br> $V_1 = 0.15$, $V_2 = 0.20$<br> Next: "Does it have fur?"<br> Target Qs: $0.45$, $0.50$<br> $\text{Target V}_1 = -0.685$, $\text{Target V}_2 = -0.640$<br> Losses:<br> $Q_1$ loss = $0.874$, $Q_2$ loss = $0.884$<br> $V_1$ loss = $0.090$, $V_2$ loss = $0.090$<br> Total: **$1.938$** |
+| 4 | Actor log prob: $-2.3$<br> Advantage: $0.10$<br> PG loss: $0.23$ |
 | 5 | Target Update with $\tau = 0.1$ |
 
 ---
