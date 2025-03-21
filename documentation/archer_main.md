@@ -8,9 +8,7 @@
 
 The goal in RL is to learn a policy $\pi$ that maximizes expected cumulative discounted rewards:
 
-$$
-J(\pi) = \mathbb{E}_{\tau \sim \pi} \left[ \sum_{t=0}^T \gamma^t \, r_t \right]
-$$
+$$J(\pi) = \mathbb{E}_{\tau \sim \pi} \left[ \sum_{t=0}^T \gamma^t r_t \right]$$
 
 - $\tau$: trajectory  
 - $\gamma$: discount factor  
