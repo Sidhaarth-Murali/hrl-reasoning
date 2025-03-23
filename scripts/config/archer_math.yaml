@@ -1,0 +1,51 @@
+defaults:
+  - default
+  - _self_
+
+# system paths
+cache_dir: '/home/yifei/.cache'  # You might want to change this
+save_path: 'saved_models/archer_math'
+
+# checkpoint
+checkpoint_path: null  # No initial checkpoint for now
+
+# env
+env_name: math
+env_load_path: null  # Using base Llama model
+
+# model settings
+agent_type: "archer"
+policy_lm: "meta-llama/Llama-3.2-1B"
+critic_lm: "roberta-base"
+max_new_tokens: 1024  # Maximum tokens for generation
+max_tokens: 1280      # Maximum tokens for environment
+temperature: 0.7
+do_sample: true
+use_lora: false
+
+# training hyperparameters
+capacity: 100000      # Replay buffer size
+rollout_size: 64      # Number of parallel environments
+eval_size: 32        # Number of trajectories for evaluation
+batch_size: 8        # Training batch size
+iterations: 125      # 8000/64 ≈ 125 (one pass through dataset)
+epochs: 50           # Times to train critic on each batch
+actor_epochs: 3      # Times to train actor on each batch
+warmup_iter: 20      # Initial iterations without policy updates
+grad_accum_steps: 32
+critic_lr: 2e-5
+lm_lr: 1e-6
+
+# algorithm parameters
+gamma: 0.95        
+tau: 0.1           
+max_grad_norm: 1.0  
+
+# evaluation settings
+save_freq: 25        
+eval_freq: 25       
+
+# wandb logging
+use_wandb: true
+project_name: 'llm_rl_math'
+run_name: 'archer-math' 
