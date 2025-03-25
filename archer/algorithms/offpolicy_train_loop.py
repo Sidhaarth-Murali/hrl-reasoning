@@ -16,7 +16,7 @@ def offpolicy_train_loop(env,\
                 tokenizer,\
                 accelerator,\
                 warmup_iter: int = 20,
-                rollout_size: int = 50,\
+                rollout_size: int = 16,\
                 eval_size: int = 1,
                 batch_size: int = 2,
                 capacity: int = 500000,
@@ -86,6 +86,7 @@ def offpolicy_train_loop(env,\
                                             env_idx = env_idx,
                                             use_tqdm=False,
                                             decode_f = decode_f)
+            breakpoint()
             info = {"rollout.mean": np.mean([d[0]["trajectory_reward"] for d in trajectories]),\
                     "rollout.max": np.max([d[0]["trajectory_reward"] for d in trajectories]),\
                     "rollout.min": np.min([d[0]["trajectory_reward"] for d in trajectories])}

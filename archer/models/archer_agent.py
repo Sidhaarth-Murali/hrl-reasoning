@@ -37,8 +37,10 @@ class ArcherAgent(torch.nn.Module):
         self.soft_update_target_critic(1)
         self.tokenizer = AutoTokenizer.from_pretrained(policy_lm, trust_remote_code=True, cache_dir=cache_dir)
         self.tokenizer.truncation_side = 'left'
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        if self.tokenizer.pad_token is None:
+            special_tokens_dict = {'pad_token': '[PAD]'}
+            self.tokenizer.add_special_tokens(special_tokens_dict)
+            self.model.resize_token_embeddings(len(self.tokenizer))
         self.device = device
         self.dropout = torch.nn.Dropout(p=dropout)
         self.softmax = torch.nn.Softmax(dim= -1)
@@ -57,27 +59,61 @@ class ArcherAgent(torch.nn.Module):
     def get_action(self, observation):
         if self.template is not None:
             observation = [self.template.replace("{obs}", obs) for obs in observation]
-        obs_ids = self.tokenizer(observation, return_tensors='pt', padding=True, max_length=512, truncation = True).to(self.device)
-        # obs_embeds = self.accelerator.unwrap_model(self.model).get_input_embeddings()(obs_ids["input_ids"])
-        # print(inputs_embeds.shape)
-        # outputs = self.model.generate(inputs_embeds=obs_embeds, attention_mask=obs_ids['attention_mask'],\
-        #                                max_new_tokens=32, do_sample=self.do_sample, temperature = self.temperature,\
-        #                                pad_token_id = self.tokenizer.eos_token_id).cpu()
-        context_len = obs_ids['attention_mask'].size(1)
-        outputs = self.accelerator.unwrap_model(self.model).generate(**obs_ids,\
-                                    max_new_tokens=self.max_new_tokens, do_sample=self.do_sample, temperature = self.temperature,\
-                                    pad_token_id = self.tokenizer.eos_token_id).cpu()
-        outputs = outputs[:, context_len:]
-        raw_action = self.tokenizer.batch_decode(outputs, skip_special_tokens  = True)
-        for _ in range(3):
-            raw_action = [a[1:] if a.startswith('\n') else a for a in raw_action]
-        # return raw_action
-        if self.eos_str is not None:
-            # print(f"using eos str {eos_str}")
-            # print([raw_a.split(self.eos_str)[0] + self.eos_str for raw_a in raw_action])
-            return [raw_a.split(self.eos_str)[0] for raw_a in raw_action]
-        else:
-            return raw_action
+        
+        # Create actions list to return
+        actions = []
+        
+        # Process each observation individually with chat template
+        for obs in observation:
+            # Define messages for chat template
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a highly intelligent math assistant. Provide concise, step-by-step solutions to math problems."
+                },
+                {
+                    "role": "user",
+                    "content": obs
+                },
+            ]
+            
+            # Format input using chat template if available
+            if hasattr(self.tokenizer, "apply_chat_template"):
+                inputs = self.tokenizer.apply_chat_template(
+                    conversation=messages,
+                    add_generation_prompt=True,
+                    return_tensors="pt"
+                ).to(self.device)
+            else:
+                # Fallback for older tokenizers: manually format the conversation
+                formatted_prompt = f"System: You are a highly intelligent math assistant. Provide concise, step-by-step solutions to math problems.\n\nUser: {obs}\n\nAssistant:"
+                inputs = self.tokenizer(formatted_prompt, return_tensors="pt", padding=True, truncation=True).to(self.device)
+            
+            # Generate 4 tokens but only use the first one
+            with torch.no_grad():
+                outputs = self.accelerator.unwrap_model(self.model).generate(
+                    input_ids=inputs["input_ids"] if isinstance(inputs, dict) else inputs,
+                    attention_mask=inputs.get("attention_mask") if isinstance(inputs, dict) else None,
+                    max_new_tokens=4,  
+                    do_sample=self.do_sample,
+                    temperature=self.temperature,  
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+            
+            # Get the context length to extract just the first new token
+            if isinstance(inputs, dict):
+                context_len = inputs["input_ids"].size(1)
+            else:
+                context_len = inputs.size(1)
+            if outputs.size(1) > context_len:
+                token_id = outputs[0, context_len]  # Only take the first new token
+                token_text = self.tokenizer.decode(token_id.unsqueeze(0), skip_special_tokens=False)
+            else:
+                token_text = " "
+            
+            actions.append(token_text)
+        
+        return actions
 
     def get_q(self, observation, action, detach_model=False):
         return self.critic.get_q(observation, action, detach_model = detach_model)

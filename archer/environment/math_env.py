@@ -12,8 +12,8 @@ import concurrent.futures
 
 logging.getLogger().setLevel(logging.CRITICAL)
 
-INITIAL_STR = "Problem:\n"
-DEFAULT_DATASET_PATH = "/Users/sidhaarthmurali/Desktop/PROJECTS/research-projects/hrl-reasoning/dataset/MATH.csv"
+INITIAL_STR = "Solve the following math problem step-by-step. When you find the final answer, express it in the format \\boxed{your answer}.\n\nProblem:"
+DEFAULT_DATASET_PATH = "dataset/MATH.csv"
 
 class MathDataset:
     """Loader for MATH dataset problems"""
@@ -139,13 +139,11 @@ class LLMMathEnv():
         self.history += token
         
         # Check if we've hit max tokens or if the answer is complete
-        done = self.token_count >= self.max_tokens or token.strip() in ['.', '!', '?']
-        
+        done = self.token_count >= self.max_tokens 
         if done:
             reward = 1.0 if self.is_correct(self.history) else -1.0
         else:
             reward = 0  # Neutral reward for intermediate tokens
-            
         self.done = done
         return self.history, reward, self.done
 
@@ -160,7 +158,8 @@ class LLMMathEnv():
             self.curr_problem = self.problems[idx]
             self.curr_answer = self.answers[idx]
             
-        self.history = INITIAL_STR + self.curr_problem + '\n'
+        # Include "Solution: " in the initial history
+        self.history = INITIAL_STR + self.curr_problem + '\n Solution: '
         self.done = False
         return self.history
 

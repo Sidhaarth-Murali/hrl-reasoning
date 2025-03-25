@@ -15,24 +15,25 @@ env_load_path: null  # Using base Llama model
 
 # model settings
 agent_type: "archer"
-policy_lm: "meta-llama/Llama-3.2-1B"
+policy_lm: "meta-llama/Llama-3.2-3B-Instruct"
 critic_lm: "roberta-base"
-max_new_tokens: 1024  # Maximum tokens for generation
-max_tokens: 1280      # Maximum tokens for environment
+max_new_tokens: 1  
+max_tokens: 20     
 temperature: 0.7
 do_sample: true
 use_lora: false
+huggingface_token: "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"
 
 # training hyperparameters
 capacity: 100000      # Replay buffer size
-rollout_size: 64      # Number of parallel environments
-eval_size: 32        # Number of trajectories for evaluation
-batch_size: 8        # Training batch size
-iterations: 125      # 8000/64 ≈ 125 (one pass through dataset)
+rollout_size: 16      # Number of parallel environments
+eval_size: 2      # Number of trajectories for evaluation
+batch_size: 2       # Training batch size
+iterations: 250      # 4000/16 ≈ 250 (one pass through dataset)
 epochs: 50           # Times to train critic on each batch
 actor_epochs: 3      # Times to train actor on each batch
 warmup_iter: 20      # Initial iterations without policy updates
-grad_accum_steps: 32
+grad_accum_steps: 1
 critic_lr: 2e-5
 lm_lr: 1e-6
 
