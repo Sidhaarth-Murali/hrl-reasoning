@@ -22,7 +22,8 @@ max_tokens: 20
 temperature: 0.7
 do_sample: true
 use_lora: false
-huggingface_token: "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"
+# Remove token for security
+# huggingface_token: "token-removed-for-security"
 
 # training hyperparameters
 capacity: 100000      # Replay buffer size
