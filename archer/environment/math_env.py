@@ -33,12 +33,10 @@ class MathDataset:
         """Load problems and answers from CSV dataset file"""
         if not os.path.exists(self.data_path):
             raise FileNotFoundError(f"MATH dataset path not found: {self.data_path}")
-            
-        print(f"Loading MATH dataset from {self.data_path}")
         
         try:
             # Read the CSV file
-            df = pd.read_csv(self.data_path)
+            df = pd.read_csv(self.data_path)[:5000]
             required_cols = ['question', 'correct_answer', 'answer']
             
             if not all(col in df.columns for col in required_cols):
@@ -136,14 +134,16 @@ class LLMMathEnv():
             return None
             
         self.token_count += 1
-        self.history += token
+        self.history += f"{token}"
         
-        # Check if we've hit max tokens or if the answer is complete
         done = self.token_count >= self.max_tokens 
-        if done:
-            reward = 1.0 if self.is_correct(self.history) else -1.0
+        if self.is_correct(self.history):
+            done = True
+            reward = 1.0
+        elif not done:
+            reward = 0 
         else:
-            reward = 0  # Neutral reward for intermediate tokens
+            reward = -1.0  
         self.done = done
         return self.history, reward, self.done
 
@@ -159,7 +159,7 @@ class LLMMathEnv():
             self.curr_answer = self.answers[idx]
             
         # Include "Solution: " in the initial history
-        self.history = INITIAL_STR + self.curr_problem + '\n Solution: '
+        self.history = INITIAL_STR + self.curr_problem + 'Solution:'
         self.done = False
         return self.history
 
@@ -176,8 +176,8 @@ class LLMBatchedMathEnv():
         env_load_path: str = None,
         cache_dir: str = '~/.cache',
         device = None,
-        max_tokens: int=1024,
-        bsize: int=32,
+        max_tokens: int=256,
+        bsize: int=4,
         data_path: str=DEFAULT_DATASET_PATH,
     ):
         # Initialize base environments

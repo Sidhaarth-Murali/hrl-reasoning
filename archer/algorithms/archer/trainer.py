@@ -155,92 +155,57 @@ class ArcherTrainer():
     def update(self, replay_buffer, no_update_actor=False):
         self.step += 1
         info = {}
-        info_list = []
-        # self.agent.critic, self.agent.target_critic = self.accelerator.prepare(self.agent.critic, self.agent.target_critic)
-        with torch.autograd.set_detect_anomaly(True):
-            # self.agent, self.critic_optimizer = self.accelerator.prepare(self.agent, self.critic_optimizer)
-            for _ in range(self.epochs):
-                data = [replay_buffer.sample(1) for _ in range(self.grad_accum_steps*replay_buffer.batch_size)]
-                for d in data:
-                    for k,v in d.items():
-                        d[k] = v[0]
-                dataloader = DataLoader(DummyDataset(data), batch_size=replay_buffer.batch_size)
-                dataloader = self.accelerator.prepare(dataloader)
-                # import IPython; IPython.embed()
-                # self.agent, self.critic_optimizer, dataloader = \
-                #     self.accelerator.prepare(self.agent,  self.critic_optimizer, dataloader)
-                self.critic_optimizer.zero_grad()
-                grad_index = 0
-                for batch in tqdm(dataloader, disable=True):
-
-                    info_list.append(self.critic_loss(**batch))
-                self.accelerator.clip_grad_norm_(self.agent.parameters(), self.max_grad_norm)
-                self.critic_optimizer.step()
-                # if self.accelerator.is_main_process:
-                self.agent.soft_update_target_critic(tau=self.tau)
-        info.update(dict_mean(info_list))
-        info_list = []
-        #update actor
+        critic_info_list = []
+        
+        # --- Critic Update ---
+        # Pre-sample data once for the epoch to reduce overhead.
+        data = [replay_buffer.sample(1) for _ in range(self.grad_accum_steps * replay_buffer.batch_size)]
+        for d in data:
+            for k, v in d.items():
+                d[k] = v[0]
+        # Increase num_workers for faster data loading.
+        dataloader = DataLoader(DummyDataset(data), batch_size=replay_buffer.batch_size, num_workers=4, shuffle=True)
+        dataloader = self.accelerator.prepare(dataloader)
+        
+        self.critic_optimizer.zero_grad()
+        for batch in tqdm(dataloader, desc="Critic Update", leave=False):
+            critic_info_list.append(self.critic_loss(**batch))
+        self.accelerator.clip_grad_norm_(self.agent.parameters(), self.max_grad_norm)
+        self.critic_optimizer.step()
+        # Soft-update target critic after critic updates.
+        self.agent.soft_update_target_critic(tau=self.tau)
+        
+        info.update(dict_mean(critic_info_list))
+        
+        # --- Actor Update ---
         if not no_update_actor:
-            print(">>>updating actor")
-            #batchsize for the actor set to 1 for mistral due to memory concern
-            action_bsize = 2 if 'mistral' in self.agent.policy_lm else replay_buffer.batch_size
-            #action_bsize = replay_buffer.batch_size
-            for _ in range(self.actor_epochs):
-                data = [replay_buffer.sample(1) for _ in range(self.grad_accum_steps*replay_buffer.batch_size)]
-                grad_index = 0
-                for d in data:
-                    for k,v in d.items():
-                        d[k] = v[0]
-                dataloader = DataLoader(DummyDataset(data), batch_size=action_bsize, shuffle=False)
-                all_pi_actions = []
-                all_advantages = []
-                # import IPython; IPython.embed()
-                dataloader = self.accelerator.prepare(dataloader)
-                #calculate advantages and pi_action beforehand due to memory concern
-                # with self.accelerator.no_sync(self.agent):
-                # for batch in dataloader:
-                #     with torch.no_grad():
-                #         pi_action = self.agent.get_action(batch["observation"])
-                #         # batch["pi_action"] = pi_action
-                #         q1, q2 = self.agent.get_q(batch["observation"], pi_action)
-                #         q = torch.minimum(q1, q2)
-                #         v1, v2 = self.agent.get_v(batch["observation"]) 
-                #         v = torch.minimum(v1, v2)
-                #         advantages = q - v
-                        # batch["advantage"] = advantages
-                        # all_pi_actions += pi_action
-                        # all_advantages += advantages.flatten().cpu().numpy().tolist()
-                # new_data = copy.deepcopy(data)
-                # for d, pi_action, advantage in zip(new_data, all_pi_actions, all_advantages):
-                #     d["pi_action"] = pi_action
-                #     d["advantage"] = advantage
-                # # import IPython; IPython.embed()
-                # # print(new_data[0])
-                # new_dataloader = DataLoader(DummyDataset(new_data), batch_size=action_bsize, shuffle=False)
-                # # breakpoint()
-                # new_dataloader = self.accelerator.prepare(new_dataloader)
-                self.lm_optimizer.zero_grad()
-                for batch in dataloader:
-                # with self.accelerator.accumulate(self.agent):
-                    # for i in range(self.grad_accum_steps):
-                    # # for i, bc_batch in zip(range(self.grad_accum_steps), bc_dataloader):
-                    #     batch = replay_buffer.sample()
-                    #     # assert len(bc_batch) > 0
-                    #     assert i <  self.grad_accum_steps
-                    with torch.no_grad():
-                        pi_action = self.agent.get_action(batch["observation"])
-                        # batch["pi_action"] = pi_action
-                        q1, q2, v1, v2 = self.agent.critic(batch["observation"], pi_action)
-                        q = torch.minimum(q1, q2)
-                        # v1, v2 = self.agent.critic(batch["observation"]) 
-                        v = torch.minimum(v1, v2)
-                        advantages = q - v
-                    info_list.append(self.actor_loss(**batch, pi_action=pi_action, advantage=advantages))
-                self.accelerator.clip_grad_norm_(self.agent.parameters(), self.max_grad_norm)
-                self.lm_optimizer.step()
-        info.update(dict_mean(info_list))
+            print(">>> Updating actor")
+            actor_info_list = []
+            # Pre-sample data once for the actor update.
+            data = [replay_buffer.sample(1) for _ in range(self.grad_accum_steps * replay_buffer.batch_size)]
+            for d in data:
+                for k, v in d.items():
+                    d[k] = v[0]
+            dataloader = DataLoader(DummyDataset(data), batch_size=replay_buffer.batch_size, num_workers=4, shuffle=False)
+            dataloader = self.accelerator.prepare(dataloader)
+            
+            self.lm_optimizer.zero_grad()
+            for batch in tqdm(dataloader, desc="Actor Update", leave=False):
+                # Calculate advantages in a no_grad block to save memory.
+                with torch.no_grad():
+                    pi_action = self.agent.get_action(batch["observation"])
+                    q1, q2, v1, v2 = self.agent.critic(batch["observation"], pi_action)
+                    q = torch.minimum(q1, q2)
+                    v = torch.minimum(v1, v2)
+                    advantages = q - v
+                actor_info_list.append(self.actor_loss(**batch, pi_action=pi_action, advantage=advantages))
+            self.accelerator.clip_grad_norm_(self.agent.parameters(), self.max_grad_norm)
+            self.lm_optimizer.step()
+            
+            info.update(dict_mean(actor_info_list))
+            
         return info
+
 
     def save(self, path):
         torch.save({'model_state_dict': self.accelerator.unwrap_model(self.agent.model).state_dict(),

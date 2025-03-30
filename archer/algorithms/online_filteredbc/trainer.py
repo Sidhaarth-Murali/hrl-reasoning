@@ -27,13 +27,14 @@ class BCTrainer():
         self.agent = agent
         self.tokenizer = tokenizer
         self.lm_optimizer = torch.optim.Adam(agent.model.parameters(), lr = lm_lr)
+        self.critic_optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))], lr=1e-4)
         self.criterion = torch.nn.MSELoss()
         self.grad_accum_steps = grad_accum_steps
         self.epochs = epochs
         self.step = 0
         self.max_grad_norm = max_grad_norm
         self.accelerator = accelerator
-        self.agent, self.lm_optimizer = self.accelerator.prepare(self.agent, self.lm_optimizer)
+        self.agent, self.lm_optimizer, self.critic_optimizer = self.accelerator.prepare(self.agent, self.lm_optimizer, self.critic_optimizer)
 
     def actor_loss(self, observation, action, **kwargs):
         loss = plain_bc_loss(self.accelerator.unwrap_model(self.agent).model, self.tokenizer, observation, action)

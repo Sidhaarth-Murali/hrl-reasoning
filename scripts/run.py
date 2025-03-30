@@ -16,9 +16,16 @@ import hydra
 from accelerate import Accelerator
 from datetime import timedelta
 from accelerate import DistributedDataParallelKwargs, InitProcessGroupKwargs
+import argparse
 transformers.logging.set_verbosity_error()
 
-CONFIG_NAME = "archer_math"
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description='Run RL training for math environment')
+parser.add_argument('--config', type=str, default="archer_math", 
+                    help='Configuration to use (archer_math or bc_math)')
+args, unknown = parser.parse_known_args()
+
+CONFIG_NAME = args.config
 @hydra.main(version_base=None, config_path="./config/", config_name=CONFIG_NAME)
 def main(config: "DictConfig"):
     colorful_print(">>> Configuration file: "+CONFIG_NAME+"<<<", fg='blue')

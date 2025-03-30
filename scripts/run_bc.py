@@ -1,15 +1,13 @@
+import os, sys
 import torch
 import transformers
 from tqdm import tqdm
-from LLM_rep_RL.environment import ContextualTextNavEnv
-from LLM_rep_RL.models import DecisionModel
-from LLM_rep_RL.data import DummyDataset
-from LLM_rep_RL.algorithms.bc import train_loop
-from LLM_rep_RL.utils import colorful_print
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from archer.environment import LLMBatchedMathEnv
+from archer.data import DummyDataset
+from archer.algorithms.bc import train_loop, plain_bc_loss
+from archer.utils import colorful_print
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers import LlamaForCausalLM, LlamaTokenizer
-from transformers import AutoTokenizer, RobertaModel
-from peft import get_peft_config, PeftModel, PeftConfig, get_peft_model, LoraConfig, TaskType
 import torch.nn as nn
 import numpy as np 
 import wandb
@@ -19,46 +17,93 @@ import json
 import os
 import hydra
 import random
+import argparse
 
-CONFIG_NAME = "reinforce"
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description='Run behavior cloning for math environment')
+parser.add_argument('--config', type=str, default="bc_math", 
+                    help='Configuration to use (default: bc_math)')
+args, unknown = parser.parse_known_args()
+
+CONFIG_NAME = args.config
 @hydra.main(version_base=None, config_path="./config/", config_name=CONFIG_NAME)
 def main(config: "DictConfig"):
     colorful_print(">>> Configuration file: "+CONFIG_NAME+"<<<", fg='blue')
     colorful_print(OmegaConf.to_yaml(config), fg='red')
-    from huggingface_hub import login
-    login(token=config.huggingface_token)
-    os.environ['TRANSFORMERS_CACHE'] = config.cache_dir
+    try:
+        from huggingface_hub import login
+        login(token=config.huggingface_token)
+    except:
+        print(">>> Huggingface token not found.")
 
-    # default to using cuda:0 and cuda:1
-    device = 'cuda:0'
-    # load reference llama model and llama tokenizer
-    model = AutoModelForCausalLM.from_pretrained('gpt2').to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr = 1e-4)
-    tokenizer = AutoTokenizer.from_pretrained('gpt2', trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-
-    # construct dataloader
-    with open("/nfs/kun2/users/yifei/LLM_rep_RL/LLM_rep_RL/data/twenty_questions.json", "r") as fb:
-        raw_data = json.load(fb)
-    data = []
-    for d in raw_data:
-        lines = d["lines"]
-        len_lines = len(lines)
-        for i in range(len_lines):
-            obs = "Questions:\n" + "\n".join(lines[:i])
-            action = lines[i].split("?")[0]+'?'
-            data.append({'observation': obs, 'action': action+'\n'})
-    random.shuffle(data)
-    dataloader = DataLoader(DummyDataset(data[:]), batch_size = 8)
-
-    train_loop(model = model,\
-                tokenizer=tokenizer,\
-                bc_dataloader = dataloader,\
-                optimizer = optimizer,\
-                iterations  = 1,\
-                grad_accum_steps = 4)
-
+    # Load environment to generate training data
+    env = LLMBatchedMathEnv(
+        env_load_path=config.env_load_path,
+        device=device,
+        cache_dir=config.cache_dir,
+        max_tokens=config.max_tokens
+    )
+    
+    # Load model and tokenizer
+    model = AutoModelForCausalLM.from_pretrained(config.policy_lm, cache_dir=config.cache_dir).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(config.policy_lm, cache_dir=config.cache_dir)
+    tokenizer.pad_token = tokenizer.eos_token if tokenizer.pad_token is None else tokenizer.pad_token
+    
+    # Create optimizer
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.lm_lr)
+    
+    # Generate training data by interacting with the environment
+    print(">>> Generating training data...")
+    num_problems = 50  # Number of math problems to use for training
+    training_data = []
+    
+    for i in tqdm(range(num_problems)):
+        # Reset the environment
+        observations = env.reset(i % len(env.env_list[0].problems))
+        problem = observations[0]  # Get the first problem
+        
+        # Generate the answer using the environment's model
+        with torch.no_grad():
+            encoder_ids = env.tokenizer(problem, return_tensors='pt').to(device)
+            outputs = env.model.generate(
+                input_ids=encoder_ids['input_ids'],
+                attention_mask=encoder_ids['attention_mask'],
+                max_new_tokens=config.max_tokens,
+                do_sample=True,
+                temperature=0.7
+            )
+            answer = env.tokenizer.decode(outputs[0][encoder_ids['input_ids'].shape[1]:], skip_special_tokens=True)
+        
+        # Add to training data
+        training_data.append({
+            'observation': problem,
+            'action': answer
+        })
+    
+    # Create dataloader
+    dataloader = DataLoader(DummyDataset(training_data), batch_size=config.batch_size, shuffle=True)
+    
+    # Start training
+    print(">>> Starting behavior cloning training...")
+    if config.use_wandb:
+        wandb.login(key=config.wandb_key)
+        wandb.init(project=config.project_name, name=config.run_name, config=dict(config))
+    
+    # Train the model using the simple BC train loop
+    train_loop(
+        model=model,
+        tokenizer=tokenizer,
+        bc_dataloader=dataloader,
+        optimizer=optimizer,
+        iterations=config.iterations,
+        grad_accum_steps=config.grad_accum_steps,
+        save_path=config.save_path,
+        use_wandb=config.use_wandb
+    )
+    
+    print(">>> Training complete!")
 
 if __name__ == "__main__":
     main()
