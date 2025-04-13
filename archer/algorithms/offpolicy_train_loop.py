@@ -16,14 +16,14 @@ def offpolicy_train_loop(env,
                          agent,
                          tokenizer,
                          accelerator,
+                         grad_accum_steps: int = 8,
                          warmup_iter: int = 20,
                          rollout_size: int = 16,
                          eval_size: int = 1,
-                         batch_size: int = 2,
+                         batch_size: int = 4,
                          capacity: int = 500000,
                          iterations: int = 10,
                          epochs: int = 3,
-                         grad_accum_steps: int = 1,
                          env_idx: int = None,
                          do_sample: bool = False,
                          temperature: float = 2.0,
@@ -77,18 +77,19 @@ def offpolicy_train_loop(env,
             print("Creating new checkpoint directory")
             os.makedirs(save_path, exist_ok=True)
             
-    agent.prepare()
+    accelerator.unwrap_model(agent).prepare()
     print(">>> Start Iterations")
 
     for i in tqdm(range(iterations)):
         if accelerator.is_main_process:
             # Collect training trajectories.
+            print(f"Iter:{i}")
             trajectories = batch_interact_environment(agent=agent,
                                                       tokenizer=tokenizer,
                                                       env=env,
                                                       num_trajectories=rollout_size,
                                                       env_idx=env_idx,
-                                                      use_tqdm=False,
+                                                      use_tqdm=True,
                                                       decode_f=decode_f)
             # Calculate training reward metrics (using the trajectory reward).
             train_rewards = [d[0]["trajectory_reward"] for d in trajectories]
@@ -97,6 +98,7 @@ def offpolicy_train_loop(env,
                 "train_reward.max": np.max(train_rewards),
                 "train_reward.min": np.min(train_rewards)
             }
+            print(info)
 
             # Periodically evaluate.
             if (i + 1) % eval_freq == 0:
@@ -127,7 +129,6 @@ def offpolicy_train_loop(env,
             torch.save(replay_buffer, os.path.join(save_path, 'replay_buffer.pt'))
             torch.save(all_trajectories, os.path.join(save_path, 'trajectories.pt'))
             print(">>> Saved Replay Buffer")
-            time.sleep(15)
         else:
             info = {}
 

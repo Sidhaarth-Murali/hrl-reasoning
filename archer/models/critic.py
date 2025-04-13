@@ -69,7 +69,7 @@ class DoubleCritic(torch.nn.Module):
 
     def forward(self, observation, action, detach_model=False):
         state_actions = [o + a for o,a in zip(observation, action)]
-        obs_ids = self.base_tokenizer(observation, padding=True, return_tensors='pt', max_length=1024, truncation=True).to(self.device)
+        obs_ids = self.base_tokenizer(observation, padding=True, return_tensors='pt', max_length=512, truncation=True).to(self.device)
         
         # breakpoint() # For debugging tokenization
         if detach_model:
@@ -78,7 +78,7 @@ class DoubleCritic(torch.nn.Module):
         else:
             lm_states = self.base_lm(**obs_ids).pooler_output
             
-        action_ids = self.base_tokenizer(action, padding=True, return_tensors='pt', max_length=1024, truncation=True).to(self.device)
+        action_ids = self.base_tokenizer(action, padding=True, return_tensors='pt', max_length=512, truncation=True).to(self.device)
         
         # breakpoint() # For debugging tokenization
         if detach_model:
@@ -86,9 +86,7 @@ class DoubleCritic(torch.nn.Module):
                 action_states = self.base_lm(**action_ids).pooler_output
         else:
             action_states = self.base_lm(**action_ids).pooler_output
-            
         q_states = torch.cat([lm_states, action_states], dim=1)
-        # breakpoint() # For debugging state concatenation
         return self.critic1(q_states), self.critic2(q_states), self.v_critic1(lm_states), self.v_critic2(lm_states)
     
     def get_q(self, observation, action, detach_model=False):
@@ -106,7 +104,7 @@ class DoubleCritic(torch.nn.Module):
         """
         # Process observation through the base model
         obs_ids = self.base_tokenizer(observation, padding=True, return_tensors='pt', 
-                                   max_length=1024, truncation=True).to(self.device)
+                                   max_length=512, truncation=True).to(self.device)
         
         # breakpoint() # For debugging observation processing
         if detach_model:

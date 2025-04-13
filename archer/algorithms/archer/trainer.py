@@ -167,6 +167,7 @@ class ArcherTrainer():
         dataloader = DataLoader(DummyDataset(data), batch_size=replay_buffer.batch_size, num_workers=4, shuffle=True)
         dataloader = self.accelerator.prepare(dataloader)
         
+        
         self.critic_optimizer.zero_grad()
         for batch in tqdm(dataloader, desc="Critic Update", leave=False):
             critic_info_list.append(self.critic_loss(**batch))

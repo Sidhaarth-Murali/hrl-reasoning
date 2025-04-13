@@ -1,6 +1,5 @@
 import os, sys
 import torch
-import transformers
 from tqdm import tqdm
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from archer.environment import LLMBatchedMathEnv

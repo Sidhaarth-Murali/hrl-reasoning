@@ -103,9 +103,9 @@ def main(config: "DictConfig"):
 
     offpolicy_train_loop(
         env=env,
+        eval_env=eval_env,
         agent=agent,
         tokenizer=tokenizer,
-        eval_env=eval_env,
         accelerator=accelerator,
         decode_f=decode_f,
         **config
