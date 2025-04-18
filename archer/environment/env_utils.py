@@ -32,7 +32,7 @@ def add_mc_return(trajectory, gamma = 0.95):
 
 def batch_interact_environment(agent, tokenizer, env, num_trajectories,
                                post_f=lambda x: x, use_tqdm=True, decode_f=lambda x: x,
-                               env_idx=None, max_steps=42):
+                               env_idx=None, max_steps=1):
     """
     In a batched way, interact with the environments to get a list of trajectories.
     Each trajectory is a list of steps where each step is a dict with the keys:

@@ -9,11 +9,16 @@ import re
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import concurrent.futures
+from deepeval.test_case import LLMTestCase, LLMTestCaseParams
+from deepeval.metrics import GEval
+
 
 logging.getLogger().setLevel(logging.CRITICAL)
-
 INITIAL_STR = "Solve the following math problem step-by-step by thinking deeply and concise. When you find the final answer, express it in the format \\boxed{your answer}.\n\nProblem:"
 DEFAULT_DATASET_PATH = "dataset/MATH.csv"
+import os
+api_key = "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"
+os.environ["OPENAI_API_KEY"] = api_key
 
 class MathDataset:
     """Loader for MATH dataset problems"""
@@ -68,7 +73,7 @@ class MathDataset:
 class LLMMathEnv():
     def __init__(
         self,
-        max_tokens: int=324,
+        max_tokens: int=512,
         data_path: str=DEFAULT_DATASET_PATH,
         test_mode: bool=False
     ):
@@ -80,6 +85,27 @@ class LLMMathEnv():
         self.done = True
         self.token_count = 0
         self.eos_str = "\n"
+        
+        # Initialize GEval metric for answer verification
+        self.correctness_metric = GEval(
+            model="o3-mini",
+            name="Math Final Answer Correctness",
+            evaluation_steps=[
+                "Read the actual output and the expected output carefully.",
+                "Extract the final numerical answer or boxed result from both.",
+                "Compare the two final answers: they must match exactly or be mathematically equivalent.",
+                "If the final answer in the actual output is missing, unclear, or incorrect, assign a low score.",
+                "Ignore differences in intermediate steps unless they impact the final answer.",
+            ],
+            evaluation_params=[
+                LLMTestCaseParams.INPUT,
+                LLMTestCaseParams.ACTUAL_OUTPUT,
+                LLMTestCaseParams.EXPECTED_OUTPUT,
+            ],
+            threshold=1.0,
+            strict_mode=True,
+            verbose_mode=False,
+        )
         
         # Load dataset
         self._load_dataset(data_path)
@@ -105,32 +131,27 @@ class LLMMathEnv():
             raise
 
     def is_correct(self, generated_answer):
-
-        gen_boxed = re.search(r'\\boxed{([^}]+)}', generated_answer)
-        gen_answer = gen_boxed.group(1) if gen_boxed else generated_answer
-        
-        gen_answer = re.sub(r'\s+', '', gen_answer.lower())
-        target_answer = re.sub(r'\s+', '', str(self.curr_answer).lower())
-        if gen_answer == target_answer:
-            return True
-
+        """Check if the generated answer contains the correct answer number"""
+        numbers = re.findall(r'-?\d+\.?\d*', generated_answer)
+        if not numbers:
+            return False
         try:
-            from sympy import sympify
-            gen_val = float(sympify(gen_answer))
-            target_val = float(sympify(target_answer))
-            return abs(gen_val - target_val) < 1e-6
-        except:
-            return target_answer in gen_answer
+            boxed_match = re.search(r'\\boxed{([^}]+)}', self.curr_answer)
+            target_answer = boxed_match.group(1) if boxed_match else self.curr_answer
+            target_numbers = re.findall(r'-?\d+\.?\d*', target_answer)
+            if not target_numbers:
+                return target_answer.strip() in generated_answer
+            return any(num.strip() == target_num.strip() for num in numbers for target_num in target_numbers)
+            
+        except Exception:
+            return str(self.curr_answer).strip() in generated_answer
     
     def _step(self, action_text):
         """Process a complete multi-token action from the agent."""
         if self.done:
             return None
-        
-        # Append the new action text to the conversation history.
         new_history = self.history + action_text
-        
-        # Update token count accurately.
+
         tokenizer = self.get_tokenizer()
         new_tokens_count = len(tokenizer.encode(new_history))
         initial_tokens_count = len(tokenizer.encode(self.history))
@@ -138,24 +159,12 @@ class LLMMathEnv():
         self.token_count += tokens_added
         self.history = new_history
 
-        # If exactly two EOS tokens have been produced, mark the output as complete.
-        if self.history.count(self.eos_str) == 2:
-            done = True
-            # Evaluate the answer: reward 1 if correct, otherwise -1.
-            if self.is_correct(self.history):
-                reward = 1.0
-            else:
-                reward = -1.0
+        done = True
+        if self.is_correct(self.history):
+            reward = 1.0
         else:
-            # Otherwise, check if we've hit the token limit.
-            done = (self.token_count >= self.max_tokens)
-            if self.is_correct(self.history):
-                reward = 1.0
-            else:
-                reward = -1.0 if done else 0
-        
+            reward = 0.0
         self.done = done
-
         return self.history, reward, self.done
 
     def get_tokenizer(self):
@@ -171,13 +180,10 @@ class LLMMathEnv():
             self.curr_problem = self.problems[idx]
             self.curr_answer = self.answers[idx]
         else:
-            # Randomly select a problem
             idx = random.randint(0, len(self.problems)-1)
             self.curr_problem = self.problems[idx]
             self.curr_answer = self.answers[idx]
             
-        # Include "Solution: " in the initial history
-        # Better formatting
         self.history = INITIAL_STR + self.curr_problem + '\nSolution: '
         self.done = False
         return self.history
@@ -195,7 +201,7 @@ class LLMBatchedMathEnv():
         env_load_path: str = None,
         cache_dir: str = '~/.cache',
         device = None,
-        max_tokens: int=324,
+        max_tokens: int=512,
         bsize: int=4,
         data_path: str=DEFAULT_DATASET_PATH,
     ):

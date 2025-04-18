@@ -10,8 +10,8 @@ from archer.models.critic import DoubleCritic
 
 class ArcherAgent(torch.nn.Module):
     def __init__(self, device, accelerator, policy_lm = "gpt2", critic_lm = "roberta-base", 
-                cache_dir = '~/.cache', dropout = 0.5, TEMPLATE = None, use_lora=False,
-                do_sample = True, temperature = 1.0, max_new_tokens = 8, use_bfloat16 = False, eos_str = '\n'):
+                cache_dir = '~/.cache', dropout = 0.5, TEMPLATE = None, use_lora=True,
+                do_sample = True, temperature = 0.9, max_new_tokens = 512, use_bfloat16 = False, eos_str = '\n'):
         super(ArcherAgent, self).__init__()
         if use_bfloat16:
             self.model = AutoModelForCausalLM.from_pretrained(policy_lm, cache_dir=cache_dir,
@@ -66,39 +66,30 @@ class ArcherAgent(torch.nn.Module):
         if self.template is not None:
             observation = [self.template.replace("{obs}", obs) for obs in observation]
         
-        # Instruct the model to include exactly two EOS tokens when done.
-        formatted_prompts = [
+        prompts = [
             f"Solve the following math problem step-by-step. When you find the final answer, express it in the format \\boxed{{your answer}}. "
-            f"Once your solution is complete, append exactly two EOS tokens (i.e. {self.eos_str}{self.eos_str}) to signal that you are done.\n\n{obs}"
-            for obs in observation
+            f"Once your solution is complete, append exactly two EOS tokens to signal that you are done.\n\n{example}"
+            for example in observation
         ]
+
+        # Tokenize
+        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(self.model.device)
         
-        # Tokenize all prompts in a batch
-        inputs = self.tokenizer(formatted_prompts, return_tensors="pt", padding=True, truncation=True).to(self.device)
-        
+        # Generate
         with torch.no_grad():
-            # Use the parameters from initialization
-            generated_ids = self.accelerator.unwrap_model(self.model).generate(
-                input_ids=inputs.input_ids,
-                attention_mask=inputs.attention_mask,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=self.do_sample,  
-                temperature=self.temperature,  
-                use_cache=True,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.encode(self.eos_str, add_special_tokens=False)[0],
+            outputs = self.model.generate(
+                **inputs,
+                do_sample=True,
+                temperature=0.9,
+                pad_token_id=self.tokenizer.eos_token_id,
+                use_cache=True
             )
-        
-        # Extract and decode each generated response
+
         actions = []
-        for i, gen_ids in enumerate(generated_ids):
-            actual_input_length = torch.sum(inputs.attention_mask[i]).item()
-            generated_text = self.tokenizer.decode(
-                gen_ids[actual_input_length:],
-                skip_special_tokens=True
-            )
-            actions.append(generated_text)
-        
+        for j, output in enumerate(outputs):
+            decoded = self.tokenizer.decode(output, skip_special_tokens=True)
+            actions.append(decoded)
+        breakpoint()
         return actions
 
     def get_q(self, observation, action, detach_model=False):
