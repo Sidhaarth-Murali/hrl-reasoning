@@ -14,7 +14,7 @@ from deepeval.metrics import GEval
 
 
 logging.getLogger().setLevel(logging.CRITICAL)
-INITIAL_STR = "Solve the following math problem step-by-step by thinking deeply and concise. When you find the final answer, express it in the format \\boxed{your answer}.\n\nProblem:"
+INITIAL_STR = ""
 DEFAULT_DATASET_PATH = "dataset/MATH.csv"
 import os
 api_key = "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"
@@ -64,7 +64,8 @@ class MathDataset:
             self.test_answers = test_df['answer'].apply(str).tolist()
             self.test_explanations = test_df['correct_answer'].tolist()
             
-            print(f"Loaded {len(self.train_problems)} training problems and {len(self.test_problems)} test problems")
+            # Comment out to prevent multiple prints during environment initialization
+            # print(f"Loaded {len(self.train_problems)} training problems and {len(self.test_problems)} test problems")
                 
         except Exception as e:
             print(f"Error loading CSV: {e}")
@@ -131,20 +132,33 @@ class LLMMathEnv():
             raise
 
     def is_correct(self, generated_answer):
-        """Check if the generated answer contains the correct answer number"""
-        numbers = re.findall(r'-?\d+\.?\d*', generated_answer)
-        if not numbers:
+        """Check if the generated answer contains the correct answer number,
+        by extracting the number from the last 50 characters of the model's output."""
+        
+        # 1) Look only at the tail of the answer
+        tail = generated_answer
+        
+        # 2) Extract all numbers in that tail
+        nums_in_tail = re.findall(r'-?\d+\.?\d*', tail)
+        if not nums_in_tail:
             return False
-        try:
-            boxed_match = re.search(r'\\boxed{([^}]+)}', self.curr_answer)
-            target_answer = boxed_match.group(1) if boxed_match else self.curr_answer
-            target_numbers = re.findall(r'-?\d+\.?\d*', target_answer)
-            if not target_numbers:
-                return target_answer.strip() in generated_answer
-            return any(num.strip() == target_num.strip() for num in numbers for target_num in target_numbers)
-            
-        except Exception:
-            return str(self.curr_answer).strip() in generated_answer
+        
+        # 3) Assume the last number in that slice is the model's final answer
+        answer_in_generated = nums_in_tail[-1].strip()
+
+        boxed_match = re.search(r'\\boxed{([^}]+)}', self.curr_answer)
+        if boxed_match:
+            candidate = boxed_match.group(1)
+        else:
+            candidate = self.curr_answer
+        
+        # 5) Pull out the first number from that candidate
+        target_match = re.search(r'-?\d+\.?\d*', candidate)
+        if not target_match:
+            return False
+        target_answer = target_match.group(0).strip()
+        return answer_in_generated == target_answer
+
     
     def _step(self, action_text):
         """Process a complete multi-token action from the agent."""
@@ -202,8 +216,10 @@ class LLMBatchedMathEnv():
         cache_dir: str = '~/.cache',
         device = None,
         max_tokens: int=512,
-        bsize: int=4,
+        bsize: int=64,  
         data_path: str=DEFAULT_DATASET_PATH,
+        correction_model_path: str = None,  
+        use_smart_corrections: bool = True, 
     ):
         # Initialize base environments
         base_env = LLMMathEnv(max_tokens=max_tokens, data_path=data_path)
@@ -212,8 +228,30 @@ class LLMBatchedMathEnv():
         
         # Load model and tokenizer
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B", cache_dir=cache_dir)
-        self.model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B", cache_dir=cache_dir).to(self.device)
+        self.model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B-Instruct", cache_dir=cache_dir).to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct", cache_dir=cache_dir)
+        
+        # Smart correction settings
+        self.use_smart_corrections = use_smart_corrections
+        self.correction_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B-Instruct", cache_dir=cache_dir).to(self.device)
+        
+        # If smart corrections are enabled, load the correction model
+        if use_smart_corrections:
+            if correction_model_path:
+                try:
+                    self.correction_model = AutoModelForCausalLM.from_pretrained(
+                        correction_model_path, cache_dir=cache_dir
+                    ).to(self.device)
+                        
+                    print(f"Loaded correction model from {correction_model_path}")
+                except Exception as e:
+                    print(f"Error loading correction model: {e}")
+                    print("Falling back to static correction templates")
+                    self.use_smart_corrections = False
+            else:
+                # Use the same model for both tasks (to save memory)
+                self.correction_model = self.model
+                print("Using the same model for both solution generation and correction guidance")
         
         # Load custom weights if provided
         if env_load_path:
@@ -235,6 +273,24 @@ class LLMBatchedMathEnv():
             output_scores=True
         )
         return self.tokenizer.batch_decode(outputs.sequences[:, -1:], skip_special_tokens=True)
+        
+    def generate_correction_instruction(self, problem, solution):
+        """Generate a custom correction instruction for a given problem and solution"""
+        from archer.prompts.math import generate_smart_correction_prompt
+
+        if self.use_smart_corrections and self.correction_model:   
+ 
+            return generate_smart_correction_prompt(
+                problem, 
+                solution, 
+                correction_model=self.correction_model,
+                tokenizer=self.tokenizer,
+                device=self.correction_model.device
+            )
+        else:
+            # Fall back to static template
+            from archer.prompts.math import format_math_self_correction_prompt
+            return format_math_self_correction_prompt(problem + solution)
 
     def reset(self, idx: Optional[int] = None):
         """Reset all environments, optionally to a specific problem index"""
@@ -246,3 +302,9 @@ class LLMBatchedMathEnv():
             jobs = [executor.submit(env._step, action_text) for env, action_text in zip(self.env_list, action_texts)]
             results = [job.result() for job in jobs]
         return results
+        
+    def get_current_histories(self):
+        """Return the current history of each environment.
+        This ensures that agents receive the correct prompts including self-correction instructions.
+        """
+        return [env.history for env in self.env_list]
