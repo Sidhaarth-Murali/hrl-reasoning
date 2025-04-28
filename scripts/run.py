@@ -21,11 +21,11 @@ transformers.logging.set_verbosity_error()
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Run RL training for math environment')
-parser.add_argument('--config', type=str, default="archer_math", 
-                    help='Configuration to use (archer_math or bc_math)')
+parser.add_argument('--config-name', type=str, default="archer_math", 
+                    help='Configuration to use (archer_math, bc_math, or score_math)')
 args, unknown = parser.parse_known_args()
 
-CONFIG_NAME = args.config
+CONFIG_NAME = args.config_name
 @hydra.main(version_base=None, config_path="./config/", config_name=CONFIG_NAME)
 def main(config: "DictConfig"):
     colorful_print(">>> Configuration file: "+CONFIG_NAME+"<<<", fg='blue')
@@ -89,9 +89,25 @@ def main(config: "DictConfig"):
                             temperature=config.temperature, do_sample=config.do_sample, 
                             policy_lm=config.policy_lm, critic_lm=config.critic_lm,
                             cache_dir=config.cache_dir, max_new_tokens=config.max_new_tokens)
+    elif config.agent_type.lower() == "score":
+        print(">>> Using SCoRe agent")
+        # SCoRe uses the same agent architecture as ArCHer, but different training algorithm
+        agent = ArcherAgent(
+            device=device,
+            accelerator=accelerator, 
+            temperature=config.temperature,
+            do_sample=config.do_sample, 
+            policy_lm=config.policy_lm,
+            critic_lm=config.policy_lm,  # SCoRe doesn't use a separate critic model
+            cache_dir=config.cache_dir,
+            max_new_tokens=config.max_new_tokens,
+            use_lora=config.use_lora,
+            eos_str='\n'
+        )
     else:
         raise NotImplementedError("Agent not implemented.")
     tokenizer = agent.tokenizer
+
     if config.checkpoint_path is not None:
         state_dict = torch.load(config.checkpoint_path, map_location=device)['model_state_dict']
         agent.model.load_state_dict(state_dict)

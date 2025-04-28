@@ -9,14 +9,11 @@ from archer.models.critic import DoubleCritic
 
 
 class ArcherAgent(torch.nn.Module):
-    def __init__(self, device, accelerator, policy_lm = "gpt2", critic_lm = "roberta-base", 
-                cache_dir = '~/.cache', dropout = 0.5, TEMPLATE = None, use_lora=True,
+    def __init__(self, device, accelerator, policy_lm = "llama3.2", critic_lm = "roberta-base", 
+                cache_dir = '~/.cache', dropout = 0.5, TEMPLATE = None, use_lora=False,
                 do_sample = True, temperature = 0.9, max_new_tokens = 512, use_bfloat16 = False, eos_str = '\n'):
         super(ArcherAgent, self).__init__()
-        if use_bfloat16:
-            self.model = AutoModelForCausalLM.from_pretrained(policy_lm, cache_dir=cache_dir,
-                                                              torch_dtype = torch.bfloat16).to(device)
-        else:
+        if True:
             self.model = AutoModelForCausalLM.from_pretrained(policy_lm, cache_dir=cache_dir).to(device)
         if use_lora:
             from peft import LoraConfig, TaskType, get_peft_model
@@ -31,11 +28,11 @@ class ArcherAgent(torch.nn.Module):
             print("Using LoRA")
             self.model.print_trainable_parameters()
 
-        for param in self.model.parameters():
-            param.requires_grad = False
-        for name, param in self.model.named_parameters():
-            if "lora" in name:
-                param.requires_grad = True
+            for param in self.model.parameters():
+                param.requires_grad = False
+            for name, param in self.model.named_parameters():
+                if "lora" in name:
+                    param.requires_grad = True
 
         self.template = TEMPLATE
         self.policy_lm = policy_lm
@@ -63,34 +60,51 @@ class ArcherAgent(torch.nn.Module):
         )
 
     def get_action(self, observation):
+        # Debug print for observation info
+        print(f"Debug: get_action received observations of type {type(observation)} with length {len(observation)}")
+        
         if self.template is not None:
-            observation = [self.template.replace("{obs}", obs) for obs in observation]
+            if isinstance(self.template, list):
+                from archer.utils import clean_math_prompt
+                prompts = self.template
+                prompts = [clean_math_prompt(obs) for obs in prompts]
+            else:
+                prompts = observation
+        else:
+            from archer.prompts.math import format_math_prompt
+            prompts = [format_math_prompt(example) for example in observation]
+                    
+        inputs = self.tokenizer(
+            prompts, 
+            return_tensors="pt", 
+            padding=True, 
+            truncation=True,
+            max_length=512,
+            return_attention_mask=True
+        ).to(self.model.device)
         
-        prompts = [
-            f"Solve the following math problem step-by-step. When you find the final answer, express it in the format \\boxed{{your answer}}. "
-            f"Once your solution is complete, append exactly two EOS tokens to signal that you are done.\n\n{example}"
-            for example in observation
-        ]
-
-        # Tokenize
-        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(self.model.device)
-        
-        # Generate
+        # Generate with much faster parameters
         with torch.no_grad():
+            # Cast to bfloat16 for faster inference if available
+            if hasattr(torch, 'bfloat16') and torch.cuda.is_available():
+                inputs = {k: v.to(torch.bfloat16) if isinstance(v, torch.Tensor) and v.is_floating_point() else v 
+                          for k, v in inputs.items()}
+                
             outputs = self.model.generate(
                 **inputs,
-                do_sample=True,
-                temperature=0.9,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=self.do_sample,
+                temperature=self.temperature,
                 pad_token_id=self.tokenizer.eos_token_id,
-                use_cache=True
+                eos_token_id=self.tokenizer.eos_token_id,
+                use_cache=True,
+                repetition_penalty=1.0,  
             )
-
-        actions = []
-        for j, output in enumerate(outputs):
-            decoded = self.tokenizer.decode(output, skip_special_tokens=True)
-            actions.append(decoded)
-        breakpoint()
-        return actions
+        
+        # Decode outputs efficiently
+        actions = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        clean_actions = [action.split("Your Improved Solution:")[-1] for action in actions]
+        return clean_actions
 
     def get_q(self, observation, action, detach_model=False):
         return self.critic.get_q(observation, action, detach_model = detach_model)
@@ -102,8 +116,6 @@ class ArcherAgent(torch.nn.Module):
         return self.target_critic.get_q(observation, action, detach_model = detach_model)
 
     def get_log_prob(self, observation, action):
-        if self.template is not None:
-            observation = [self.template.replace("{obs}", obs) for obs in observation]
         obs_ids = self.tokenizer(observation, return_tensors='pt', padding=True, max_length=512, truncation = True).to(self.device)
         action_ids = self.tokenizer(action, return_tensors='pt', padding=True, max_length=512, truncation = True).to(self.device)
         # action_embeds = self.model.get_input_embeddings()(action_ids["input_ids"]).detach()
@@ -132,3 +144,10 @@ class ArcherAgent(torch.nn.Module):
                 target_param.data.copy_(
                     target_param.data * (1.0 - tau) + param.data * tau
                 )
+
+    def update_template(self, new_template):
+        """Update the template used by the agent for formatting prompts.
+        This allows dynamically switching between zero-shot and correction prompts.
+        """
+        self.template = new_template
+        return self

@@ -1,1 +1,2 @@
 from .mistral import MISTRAL_TWENTY_QUESTIONS_TEMPLATE, mistral_twenty_questions_decode_actions
+from .math import MATH_ZERO_SHOT_TEMPLATE, MATH_SELF_CORRECTION_TEMPLATE, format_math_prompt, format_math_self_correction_prompt
