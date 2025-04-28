@@ -16,9 +16,7 @@ from deepeval.metrics import GEval
 logging.getLogger().setLevel(logging.CRITICAL)
 INITIAL_STR = ""
 DEFAULT_DATASET_PATH = "dataset/MATH.csv"
-import os
-api_key = "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"
-os.environ["OPENAI_API_KEY"] = api_key
+
 
 class MathDataset:
     """Loader for MATH dataset problems"""

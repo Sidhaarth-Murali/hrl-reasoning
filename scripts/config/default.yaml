@@ -23,7 +23,7 @@ batch_size: 8
 iterations: 2000 #total number of iterations
 epochs: 50 #number of epochs for the critic each iteration
 actor_epochs: 3 #number of epochs for the actor each iteration
-warmup_iter: 20 #number of iterations without updating the policy
+warmup_iter: 10 #number of iterations without updating the policy
 grad_accum_steps: 32
 do_sample: True
 temperature: 1.0

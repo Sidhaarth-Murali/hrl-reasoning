@@ -124,7 +124,7 @@ def offpolicy_train_loop(env,
                 print("Loading from checkpoint")
                 trainer.load(os.path.join(save_path, 'trainer.pt'))
                 # Try to load best reward info if it exists
-                if os.path.exists(os.path.join(save_path, 'best_train_reward.pt')):
+                if os.path.exists(os.path.join(save_path, 'best_train_reward.pt')): 
                     best_train_reward = torch.load(os.path.join(save_path, 'best_train_reward.pt'))
                     print(f"Loaded previous best training reward: {best_train_reward:.4f}")
             else:
