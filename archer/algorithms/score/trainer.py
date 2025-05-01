@@ -73,14 +73,12 @@ class SCoReTrainer():
         self.accelerator = accelerator
         self.lm_optimizer = self.accelerator.prepare(self.lm_optimizer)
         self.batch_size = batch_size
-        
-        # SCoRe specific parameters
         self.alpha = alpha
         self.beta1 = beta1
         self.beta2 = beta2
         self.stage1_steps = stage1_steps
         self.stage2_steps = stage2_steps
-        self.current_stage = 1  # Start with Stage I
+        self.current_stage = 1  
         self.total_steps = 0
     
     def calculate_kl_divergence(self, observation, action, reference_model):
@@ -241,12 +239,9 @@ class SCoReTrainer():
            Fully on-policy: uses the trajectories that were just collected."""
         print(">>> SCoRe Stage I Training (Pure REINFORCE with KL)")
         info_list = []
-                
-        # Process trajectories into a format suitable for training
-        data = self.process_trajectories(trajectories)
         
-        # Use smaller batch size if needed
-        actual_batch_size = min(self.batch_size, len(data), 2)  # Further limit batch size to 8 max
+        data = self.process_trajectories(trajectories)
+        actual_batch_size = min(self.batch_size, len(data), 2) 
         dataloader = DataLoader(DummyDataset(data), batch_size=actual_batch_size, shuffle=True)
         dataloader = self.accelerator.prepare(dataloader)
         
@@ -264,19 +259,9 @@ class SCoReTrainer():
         
         # Apply gradient clipping and step
         self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
-        self.lm_optimizer.step()
-        
-
-        
+        self.lm_optimizer.step()        
         self.total_steps += 1
-        # Check if we should transition to Stage II
-        if self.total_steps >= self.stage1_steps:
-            self.current_stage = 2
-            print(f">>> Transitioning to Stage II after {self.total_steps} steps")
-            
-            # Save Stage I checkpoint
-            self.save_stage_checkpoint(1)
-        
+
         # Calculate mean metrics across all batches
         result = dict_mean(info_list)
         
@@ -352,10 +337,16 @@ class SCoReTrainer():
         """Main update function called from the training loop.
            Takes trajectories directly instead of sampling from a replay buffer."""
         info = {}
+        breakpoint()
+        # Check if we should transition to Stage II
+        if self.current_stage == 1 and self.total_steps >= self.stage1_steps:
+            self.current_stage = 2
+            print(f">>> Transitioning to Stage II after {self.total_steps} steps")
+            
+            # Save Stage I checkpoint
+            self.save_stage_checkpoint(1)
         
         # No critic updates - pure REINFORCE
-        
-        # Determine which stage to train based on the current stage counter
         if not no_update_actor:
             if self.current_stage == 1:
                 actor_info = self.train_stage1(trajectories)

@@ -83,9 +83,7 @@ class ArcherAgent(torch.nn.Module):
             return_attention_mask=True
         ).to(self.model.device)
         
-        # Generate with much faster parameters
         with torch.no_grad():
-            # Cast to bfloat16 for faster inference if available
             if hasattr(torch, 'bfloat16') and torch.cuda.is_available():
                 inputs = {k: v.to(torch.bfloat16) if isinstance(v, torch.Tensor) and v.is_floating_point() else v 
                           for k, v in inputs.items()}

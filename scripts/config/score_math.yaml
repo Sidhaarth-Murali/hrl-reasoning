@@ -29,25 +29,23 @@ capacity: 100000      # Replay buffer size
 rollout_size: 128     # Number of parallel environments
 eval_size: 8          # Number of trajectories for evaluation
 batch_size: 4         # Training batch size
-iterations: 150        # Total number of iterations
+iterations: 2        # Total number of iterations
 epochs: 10            # Times to train critic on each batch
-actor_epochs: 4       # Times to train actor on each batch
-warmup_iter: 20        # Initial iterations without policy updates
-grad_accum_steps: 16
+actor_epochs: 3       # Times to train actor on each batch
+warmup_iter: 1        # Initial iterations without policy updates
+grad_accum_steps: 8
 critic_lr: 2e-5
 lm_lr: 5e-6
-stage1_steps: 75
-stage2_steps: 75
-total_steps: 150
+stage1_steps: 1
+stage2_steps: 1
+
 
 # algorithm parameters
 gamma: 0.95           # Discount factor
 tau: 0.1              # Soft update parameter
 max_grad_norm: 1.0    # Gradient clipping
 
-
-use_smart_corrections: false
-save_freq: 15          
+save_freq: 25          
 eval_freq: 25          
 
 # wandb logging

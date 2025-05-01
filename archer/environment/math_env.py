@@ -84,28 +84,7 @@ class LLMMathEnv():
         self.done = True
         self.token_count = 0
         self.eos_str = "\n"
-        
-        # Initialize GEval metric for answer verification
-        self.correctness_metric = GEval(
-            model="o3-mini",
-            name="Math Final Answer Correctness",
-            evaluation_steps=[
-                "Read the actual output and the expected output carefully.",
-                "Extract the final numerical answer or boxed result from both.",
-                "Compare the two final answers: they must match exactly or be mathematically equivalent.",
-                "If the final answer in the actual output is missing, unclear, or incorrect, assign a low score.",
-                "Ignore differences in intermediate steps unless they impact the final answer.",
-            ],
-            evaluation_params=[
-                LLMTestCaseParams.INPUT,
-                LLMTestCaseParams.ACTUAL_OUTPUT,
-                LLMTestCaseParams.EXPECTED_OUTPUT,
-            ],
-            threshold=1.0,
-            strict_mode=True,
-            verbose_mode=False,
-        )
-        
+                
         # Load dataset
         self._load_dataset(data_path)
     
@@ -214,7 +193,7 @@ class LLMBatchedMathEnv():
         cache_dir: str = '~/.cache',
         device = None,
         max_tokens: int=512,
-        bsize: int=64,  
+        bsize: int=128,  
         data_path: str=DEFAULT_DATASET_PATH,
         correction_model_path: str = None,  
         use_smart_corrections: bool = True, 
