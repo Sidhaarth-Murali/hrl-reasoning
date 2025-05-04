@@ -193,10 +193,12 @@ class LLMBatchedMathEnv():
         cache_dir: str = '~/.cache',
         device = None,
         max_tokens: int=512,
-        bsize: int=128,  
+        bsize: int=1,  
         data_path: str=DEFAULT_DATASET_PATH,
         correction_model_path: str = None,  
-        use_smart_corrections: bool = True, 
+        use_smart_corrections: bool = False, 
+        train_guidance_model: bool = False,
+        model_name: str = "meta-llama/Llama-3.2-1B-Instruct",
     ):
         # Initialize base environments
         base_env = LLMMathEnv(max_tokens=max_tokens, data_path=data_path)
@@ -205,14 +207,14 @@ class LLMBatchedMathEnv():
         
         # Load model and tokenizer
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B-Instruct", cache_dir=cache_dir).to(self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct", cache_dir=cache_dir)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=cache_dir).to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
         
         # Smart correction settings
         self.use_smart_corrections = use_smart_corrections
-        self.correction_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B-Instruct", cache_dir=cache_dir).to(self.device)
+        self.train_guidance_model = train_guidance_model
         
-        # If smart corrections are enabled, load the correction model
+        # Initialize correction model
         if use_smart_corrections:
             if correction_model_path:
                 try:
@@ -225,10 +227,13 @@ class LLMBatchedMathEnv():
                     print(f"Error loading correction model: {e}")
                     print("Falling back to static correction templates")
                     self.use_smart_corrections = False
+                    self.correction_model = None
             else:
                 # Use the same model for both tasks (to save memory)
                 self.correction_model = self.model
                 print("Using the same model for both solution generation and correction guidance")
+        else:
+            self.correction_model = None
         
         # Load custom weights if provided
         if env_load_path:
@@ -256,6 +261,14 @@ class LLMBatchedMathEnv():
         from archer.prompts.math import generate_smart_correction_prompt
 
         if self.use_smart_corrections and self.correction_model:   
+            # If the model has a generate_custom_guidance method (our RL trainer), use it
+            if hasattr(self.correction_model, 'generate_custom_guidance'):
+                try:
+                    guidance_texts, _ = self.correction_model.generate_custom_guidance([problem], [solution])
+                    return guidance_texts[0]
+                except Exception as e:
+                    print(f"Error using RL-trained guidance: {e}")
+                    # Fall back to standard smart correction
  
             return generate_smart_correction_prompt(
                 problem, 

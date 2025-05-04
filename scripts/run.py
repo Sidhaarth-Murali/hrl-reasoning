@@ -41,13 +41,31 @@ def main(config: "DictConfig"):
 
     # load environment
     if config.env_name == "math":
-        env = LLMBatchedMathEnv(
-            env_load_path=config.env_load_path,
-            device=device,
-            cache_dir=config.cache_dir,
-            max_tokens=config.max_tokens
-        )
-        eval_env = env
+        # Check for SMART-SCoRe or RL-guided SCoRe specific settings
+        env_kwargs = {
+            "env_load_path": config.env_load_path,
+            "device": device,
+            "cache_dir": config.cache_dir,
+            "max_tokens": config.max_tokens,
+            "bsize": config.rollout_size,
+        }
+        
+        # Add SMART-SCoRe and RL-guided SCoRe parameters if they exist in config
+        if hasattr(config, 'use_smart_corrections'):
+            env_kwargs["use_smart_corrections"] = config.use_smart_corrections
+            
+        if hasattr(config, 'correction_model_path') and config.correction_model_path:
+            env_kwargs["correction_model_path"] = config.correction_model_path
+            
+        if hasattr(config, 'train_guidance_model'):
+            env_kwargs["train_guidance_model"] = config.train_guidance_model
+            
+        env = LLMBatchedMathEnv(**env_kwargs)
+        
+        # Create a separate eval environment with smaller batch size
+        eval_env_kwargs = env_kwargs.copy()
+        eval_env_kwargs["bsize"] = config.eval_size
+        eval_env = LLMBatchedMathEnv(**eval_env_kwargs)
     else:
         raise NotImplementedError("Only math environment is supported.")
 
@@ -91,6 +109,13 @@ def main(config: "DictConfig"):
                             cache_dir=config.cache_dir, max_new_tokens=config.max_new_tokens)
     elif config.agent_type.lower() == "score":
         print(">>> Using SCoRe agent")
+        # Check if we're using a specific variant of SCoRe
+        if hasattr(config, 'use_smart_corrections') and config.use_smart_corrections:
+            if hasattr(config, 'train_guidance_model') and config.train_guidance_model:
+                print(">>> with RL-guided correction")
+            else:
+                print(">>> with SMART correction")
+                
         # SCoRe uses the same agent architecture as ArCHer, but different training algorithm
         agent = ArcherAgent(
             device=device,

@@ -5,7 +5,7 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from archer.algorithms.archer import ArcherTrainer
 from archer.algorithms.online_filteredbc import BCTrainer
-from archer.algorithms.score import SCoReTrainer
+from archer.algorithms.score import SCoReTrainer, RLGuidedSCoReTrainer
 import wandb
 from tqdm import tqdm
 import os
@@ -55,9 +55,12 @@ def offpolicy_train_loop(env,
                          beta2: float = 0.1,          # KL coefficient for Stage I
                          stage1_steps: int = 1500,    # Number of training steps for Stage I
                          stage2_steps: int = 1500,    # Number of training steps for Stage II
-                         # SMART_SCoRe additions
                          use_smart_corrections: bool = False,  # Whether to use dynamic correction instructions
                          correction_model_path: str = None,    # Path to a model for generating correction instructions
+                         train_guidance_model: bool = False,   # Whether to train the guidance model
+                         guidance_lr: float = 1e-6,            # Learning rate for the guidance model
+                         guidance_model_path: str = None,      # Path to initialize guidance model
+                         guidance_kl_coef: float = 0.05,       # KL coefficient for guidance model
                          decode_f: callable = lambda x: x,
                          **kwargs):
 
@@ -84,20 +87,57 @@ def offpolicy_train_loop(env,
                             max_grad_norm=max_grad_norm)
     elif agent_type.lower() == "score":
         # Initialize SCoRe trainer with pure REINFORCE + KL
-        trainer = SCoReTrainer(
-            agent=agent,
-            tokenizer=tokenizer,
-            accelerator=accelerator,
-            lm_lr=lm_lr,
-            grad_accum_steps=grad_accum_steps,
-            max_grad_norm=max_grad_norm,
-            alpha=alpha,
-            beta1=beta1,
-            beta2=beta2,
-            stage1_steps=stage1_steps,
-            stage2_steps=stage2_steps,
-            batch_size=batch_size
-        )
+        if train_guidance_model and use_smart_corrections:
+            print("Initializing RL-Guided SCoRe trainer with REINFORCE for both agent and guidance model")
+            
+            # Load guidance model if provided
+            guidance_model = None
+            if guidance_model_path is not None:
+                try:
+                    from transformers import AutoModelForCausalLM
+                    guidance_model = AutoModelForCausalLM.from_pretrained(
+                        guidance_model_path, 
+                        device_map={"": agent.model.device}
+                    )
+                    print(f"Successfully loaded guidance model from {guidance_model_path}")
+                except Exception as e:
+                    print(f"Error loading guidance model: {e}")
+                    print("Will initialize guidance model from reference model")
+            
+            trainer = RLGuidedSCoReTrainer(
+                agent=agent,
+                tokenizer=tokenizer,
+                accelerator=accelerator,
+                guidance_model=guidance_model,
+                guidance_lr=guidance_lr,
+                guidance_kl_coef=guidance_kl_coef,
+                train_guidance_model=train_guidance_model,
+                lm_lr=lm_lr,
+                grad_accum_steps=grad_accum_steps,
+                max_grad_norm=max_grad_norm,
+                alpha=alpha,
+                beta1=beta1,
+                beta2=beta2,
+                stage1_steps=stage1_steps,
+                stage2_steps=stage2_steps,
+                batch_size=batch_size
+            )
+        else:
+            # Standard SCoRe trainer
+            trainer = SCoReTrainer(
+                agent=agent,
+                tokenizer=tokenizer,
+                accelerator=accelerator,
+                lm_lr=lm_lr,
+                grad_accum_steps=grad_accum_steps,
+                max_grad_norm=max_grad_norm,
+                alpha=alpha,
+                beta1=beta1,
+                beta2=beta2,
+                stage1_steps=stage1_steps,
+                stage2_steps=stage2_steps,
+                batch_size=batch_size
+            )
 
     # For non-SCoRe agents, we use a replay buffer
     if agent_type.lower() != "score":
