@@ -4,6 +4,7 @@ from transformers import LlamaForCausalLM, LlamaTokenizer
 from transformers import AutoTokenizer, RobertaModel
 import torch.nn as nn
 import numpy as np
+import torch  # Add explicit torch import
 
 def add_trajectory_reward(trajectory):
     """
@@ -48,8 +49,8 @@ def batch_interact_environment(agent, tokenizer, env, num_trajectories,
     bsize = env.bsize  # Environment's batch size
     all_trajectories = []
     
-    # Calculate optimal batch size - use max possible that fits in memory
-    optimal_batch_size = bsize
+    # Calculate optimal batch size - use a smaller batch size to avoid OOM
+    optimal_batch_size = min(bsize, 32)  # Limit max batch size to avoid OOM
     
     # Process in as few batches as possible
     num_batches = (num_trajectories + optimal_batch_size - 1) // optimal_batch_size  # Ceiling division
@@ -76,6 +77,10 @@ def batch_interact_environment(agent, tokenizer, env, num_trajectories,
         if hasattr(env, 'get_current_histories'):
             batch_obs = env.get_current_histories()
         
+        # Add memory cleanup before model generation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         # Single step for each environment (SCoRe uses single-step trajectories)
         actions = agent.get_action(batch_obs)
         batch_results = env.step(decode_f(actions))
@@ -113,6 +118,10 @@ def batch_interact_environment(agent, tokenizer, env, num_trajectories,
             "Reward": f"{accuracy}",  
             "Overall": f"{correct_total}/{trajectories_collected}"
         })
+        
+        # Add another memory cleanup after processing each batch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     pbar.close()
     return all_trajectories

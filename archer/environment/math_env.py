@@ -9,8 +9,6 @@ import re
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import concurrent.futures
-from deepeval.test_case import LLMTestCase, LLMTestCaseParams
-from deepeval.metrics import GEval
 
 
 logging.getLogger().setLevel(logging.CRITICAL)
@@ -196,8 +194,8 @@ class LLMBatchedMathEnv():
         bsize: int=1,  
         data_path: str=DEFAULT_DATASET_PATH,
         correction_model_path: str = None,  
-        use_smart_corrections: bool = False, 
-        train_guidance_model: bool = False,
+        use_smart_corrections: bool = True, 
+        train_guidance_model: bool = True,
         model_name: str = "meta-llama/Llama-3.2-1B-Instruct",
     ):
         # Initialize base environments

@@ -21,6 +21,33 @@ def remove_repeated_phrases(text):
             seen[line] = None
     return '\\n'.join(seen.keys())
 
+def build_correction_templates(problems, initial_solutions, guidance_hints):
+    """
+    Return a list of nicely‑formatted correction prompts.
+
+    Each prompt contains:
+        1. Problem
+        2. Previous Solution
+        3. Guidance (deduplicated)
+        4. An explicit instruction to follow the guidance
+        5. A place for the student’s improved solution
+    """
+    templates = []
+    for prob, sol, hint in zip(problems, initial_solutions, guidance_hints):
+        cleaned_hint = remove_repeated_phrases(hint).strip()
+
+        template = (
+            f"### Problem\n{prob}\n\n"
+            f"### Previous Solution\n{sol}\n\n"
+            f"### Guidance\n{cleaned_hint}\n\n"
+            "🔎 **Task — Follow the guidance above to correct your work. Think step-by-step and at the end of the Solution, when you give your final answer, write it in the form:**\n"
+            "**Final Answer: The final answer is $answer$. I hope it is correct.**\n"
+        )
+        templates.append(template)
+
+    return templates
+
+
 def offpolicy_train_loop(env,
                          eval_env,
                          agent,
@@ -195,74 +222,32 @@ def offpolicy_train_loop(env,
                 # Calculate turn 1 rewards
                 turn1_rewards = [d[0]["trajectory_reward"] for d in trajectories_turn1]
                 
-                # Generate second turn with self-correction instruction
-                print("Generating second turn with self-correction instruction")
+                # NEW CODE: Use trainer's guidance generation functionality
+                problems = [traj[0]['observation'] for traj in trajectories_turn1]
+                solutions = [traj[0]['action'] for traj in trajectories_turn1]
                 
-                # Process the second turn in batches that match the environment's batch size
-                batch_size = env.bsize
-                num_batches = (len(trajectories_turn1) + batch_size - 1) // batch_size
-                trajectories_turn2 = []
+                # Generate guidance via trainer's custom method
+                print("Generating guidance via trainer's custom method")
+                analysis_prompts, guidance_hints = trainer.generate_custom_guidance(
+                    problems, solutions
+                )
                 
-                for batch_idx in range(num_batches):
-                    # Calculate start and end indices for this batch
-                    start_idx = batch_idx * batch_size
-                    end_idx = min(start_idx + batch_size, len(trajectories_turn1))
-                    batch_size_actual = end_idx - start_idx
-                    
-                    print(f"Processing batch {batch_idx+1}/{num_batches} with {batch_size_actual} samples")
-                    
-                    # Process batch corrections efficiently
-                    from archer.prompts.math import generate_smart_correction_prompt
-                    
-                    print(f"Batch {batch_idx+1}/{num_batches}: Processing {batch_size_actual} samples")
-                    
-                    # Collect problem-solution pairs in batch
-                    batch_problems = []
-                    batch_solutions = []
-                    for env_idx in tqdm(range(batch_size_actual), desc="Preparing batch"):
-                        traj = trajectories_turn1[start_idx + env_idx]
-                        batch_problems.append(traj[0]["observation"])
-                        batch_solutions.append(traj[0]["action"])
-                    
-                    # Process all corrections at once in batch
-                    if use_smart_corrections and hasattr(env, 'correction_model'):
-                        # Use batch smart correction prompt generation
-                        print("Generating batch correction instructions...")
-                        correction_prompts = generate_smart_correction_prompt(
-                            problem=batch_problems,
-                            solution=batch_solutions,
-                            correction_model=env.correction_model,
-                            tokenizer=tokenizer,
-                            device=env.correction_model.device if hasattr(env, 'correction_model') else None
-                        )
-                    else:
-                        # Use static template in batch
-                        correction_prompts = [format_math_self_correction_prompt(p + s) for p, s in zip(batch_problems, batch_solutions)]
-                    
-                    # Process cleaning and reset environment
-                    correction_template = []
-                    for env_idx, correction_prompt in enumerate(tqdm(correction_prompts, desc="Resetting environments")):
-                        # Reset env with the correction prompt
-                        env.env_list[env_idx].reset(None)
-                        env.env_list[env_idx].history = correction_prompt
-                        correction_template.append(remove_repeated_phrases(correction_prompt) + "\n\nYour Improved Solution:")
-                    
-                    # Run batch interaction
-                    batch_trajectories = batch_interact_environment(
-                        agent=agent,
-                        tokenizer=tokenizer,
-                        env=env,
-                        num_trajectories=batch_size_actual,
-                        env_idx=None,
-                        use_tqdm=True,
-                        decode_f=decode_f,
-                        template=correction_template
-                    )
-                    
-                    # Add these trajectories to our total
-                    trajectories_turn2.extend(batch_trajectories)
-                    print(f"Completed batch {batch_idx+1}, total trajectories so far: {len(trajectories_turn2)}/{len(trajectories_turn1)}")
-
+                # Format correction templates
+                correction_templates = build_correction_templates(problems, solutions, guidance_hints)
+                
+                # Generate second turn with custom guidance
+                print("Generating second turn with custom guidance")
+                trajectories_turn2 = batch_interact_environment(
+                    agent=agent,
+                    tokenizer=tokenizer,
+                    env=env,
+                    num_trajectories=len(trajectories_turn1),
+                    env_idx=None,
+                    use_tqdm=True,
+                    decode_f=decode_f,
+                    template=correction_templates
+                )
+                
                 # Verify we have processed all trajectories
                 assert len(trajectories_turn2) == len(trajectories_turn1), \
                     f"Expected {len(trajectories_turn1)} second-turn trajectories, but got {len(trajectories_turn2)}"
@@ -376,53 +361,33 @@ def offpolicy_train_loop(env,
                     # Calculate turn 1 rewards
                     eval_turn1_rewards = [d[0]["trajectory_reward"] for d in eval_trajectories_turn1]
                     
-                    # Generate second turn with self-correction instruction
-                    # Process the second turn in batches for evaluation
-                    batch_size = eval_env.bsize
-                    num_eval_batches = (len(eval_trajectories_turn1) + batch_size - 1) // batch_size
-                    eval_trajectories_turn2 = []
+                    # NEW CODE: Use trainer's guidance generation for evaluation too
+                    problems_eval = [traj[0]['observation'] for traj in eval_trajectories_turn1]
+                    solutions_eval = [traj[0]['action'] for traj in eval_trajectories_turn1]
                     
-                    for batch_idx in range(num_eval_batches):
-                        # Calculate start and end indices for this batch
-                        start_idx = batch_idx * batch_size
-                        end_idx = min(start_idx + batch_size, len(eval_trajectories_turn1))
-                        batch_size_actual = end_idx - start_idx
-                        
-                        print(f"Processing eval batch {batch_idx+1}/{num_eval_batches} with {batch_size_actual} samples")
-                        
-                        # For each environment in this batch, set up the self-correction prompt
-                        for env_idx in range(batch_size_actual):
-                            traj = eval_trajectories_turn1[start_idx + env_idx]
-                            problem = traj[0]["observation"]
-                            solution1 = traj[0]["action"]
-                            
-                            # Create self-correction prompt based on settings
-                            if use_smart_corrections and hasattr(eval_env, 'generate_correction_instruction'):
-                                # Use dynamic correction prompt for evaluation too
-                                correction_prompt = eval_env.generate_correction_instruction(problem, solution1)
-                            else:
-                                # Use static template (default)
-                                correction_prompt = format_math_self_correction_prompt(problem + solution1)
-                            
-                            # Reset env with the correction prompt
-                            eval_env.env_list[env_idx].reset(None)
-                            eval_env.env_list[env_idx].history = correction_prompt
-                        
-                        # Run batch interaction for this specific batch
-                        batch_trajectories = batch_interact_environment(
-                            agent=agent,
-                            tokenizer=tokenizer,
-                            env=eval_env,
-                            num_trajectories=batch_size_actual,
-                            env_idx=None,
-                            use_tqdm=True,  # Show progress for all batches
-                            decode_f=decode_f
-                        )
-                        
-                        # Add these trajectories to our total
-                        eval_trajectories_turn2.extend(batch_trajectories)
-                        print(f"Completed eval batch {batch_idx+1}, total trajectories so far: {len(eval_trajectories_turn2)}/{len(eval_trajectories_turn1)}")
-
+                    # Generate evaluation guidance
+                    eval_prompts, eval_hints = trainer.generate_custom_guidance(
+                        problems_eval, solutions_eval
+                    )
+                    
+                    # Format evaluation correction templates
+                    eval_templates = [
+                        remove_repeated_phrases(hint) + "\n\nYour Improved Solution:"
+                        for hint in eval_hints
+                    ]
+                    
+                    # Run batch interaction for evaluation second turn
+                    eval_trajectories_turn2 = batch_interact_environment(
+                        agent=agent,
+                        tokenizer=tokenizer,
+                        env=eval_env,
+                        num_trajectories=len(eval_trajectories_turn1),
+                        env_idx=None,
+                        use_tqdm=True,
+                        decode_f=decode_f,
+                        template=eval_templates
+                    )
+                    
                     # Verify we have processed all trajectories
                     assert len(eval_trajectories_turn2) == len(eval_trajectories_turn1), \
                         f"Expected {len(eval_trajectories_turn1)} second-turn eval trajectories, but got {len(eval_trajectories_turn2)}"
@@ -508,3 +473,4 @@ def offpolicy_train_loop(env,
         print(f"Best checkpoint saved at: {best_checkpoint_path}")
         
     # return trainer
+    return trainer

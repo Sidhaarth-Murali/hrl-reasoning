@@ -337,7 +337,7 @@ class SCoReTrainer():
         """Main update function called from the training loop.
            Takes trajectories directly instead of sampling from a replay buffer."""
         info = {}
-        breakpoint()
+
         # Check if we should transition to Stage II
         if self.current_stage == 1 and self.total_steps >= self.stage1_steps:
             self.current_stage = 2

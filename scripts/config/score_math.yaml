@@ -4,7 +4,7 @@ defaults:
 
 # system paths
 cache_dir: '/home/pramit/hrl-nips-work/hrl-reasoning/.cache'
-save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/score_math'
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/score'
 
 # checkpoint
 checkpoint_path: null
@@ -29,15 +29,15 @@ capacity: 100000      # Replay buffer size
 rollout_size: 128     # Number of parallel environments
 eval_size: 8          # Number of trajectories for evaluation
 batch_size: 4         # Training batch size
-iterations: 2        # Total number of iterations
+iterations: 69        # Total number of iterations
 epochs: 10            # Times to train critic on each batch
 actor_epochs: 3       # Times to train actor on each batch
-warmup_iter: 1        # Initial iterations without policy updates
+warmup_iter: 10        # Initial iterations without policy updates
 grad_accum_steps: 8
 critic_lr: 2e-5
 lm_lr: 5e-6
-stage1_steps: 1
-stage2_steps: 1
+stage1_steps: 34
+stage2_steps: 35
 
 
 # algorithm parameters
