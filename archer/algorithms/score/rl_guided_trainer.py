@@ -214,11 +214,8 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         # Log-probs under guidance model
         logp_tensor = self.calculate_guidance_log_probs(analysis_prompts, guidance_texts)
         # policy gradient loss
-        policy_loss = -torch.mean(logp_tensor * rewards_tensor)
-        try:
-            kl_div = self.calculate_guidance_kl_divergence(problems, initial_solutions)
-        except:
-            kl_div = torch.tensor(0.0, device=device, requires_grad=True)
+        policy_loss = -torch.mean(logp_tensor * rewards_tensor)    
+        kl_div = torch.tensor(0.0, device=device, requires_grad=True)
 
         kl_loss = self.guidance_kl_coef * kl_div
         total_loss = policy_loss + kl_loss
