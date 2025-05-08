@@ -5,7 +5,7 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from archer.algorithms.archer import ArcherTrainer
 from archer.algorithms.online_filteredbc import BCTrainer
-from archer.algorithms.score import SCoReTrainer, RLGuidedSCoReTrainer
+from archer.algorithms.score import SCoReTrainer, RLGuidedSCoReTrainer, BiLevelSCoReTrainer
 import wandb
 from tqdm import tqdm
 import os
@@ -88,6 +88,11 @@ def offpolicy_train_loop(env,
                          guidance_lr: float = 1e-6,            # Learning rate for the guidance model
                          guidance_model_path: str = None,      # Path to initialize guidance model
                          guidance_kl_coef: float = 0.05,       # KL coefficient for guidance model
+                         # BiLevel SCoRe additions
+                         value_model_name: str = "roberta-base",  # Model name for the value function
+                         value_lr: float = 1e-5,                 # Learning rate for the value function
+                         value_coef: float = 0.5,                # Coefficient for the value function term
+                         stop_value_gradients: bool = False,     # Whether to stop gradients from value function
                          decode_f: callable = lambda x: x,
                          **kwargs):
 
@@ -165,9 +170,50 @@ def offpolicy_train_loop(env,
                 stage2_steps=stage2_steps,
                 batch_size=batch_size
             )
+    elif agent_type.lower() == "bi_level_score":
+        print("Initializing BiLevel SCoRe trainer")
+        
+        # Load guidance model if provided
+        guidance_model = None
+        if guidance_model_path is not None:
+            try:
+                from transformers import AutoModelForCausalLM
+                guidance_model = AutoModelForCausalLM.from_pretrained(
+                    guidance_model_path, 
+                    device_map={"": agent.model.device}
+                )
+                print(f"Successfully loaded guidance model from {guidance_model_path}")
+            except Exception as e:
+                print(f"Error loading guidance model: {e}")
+                print("Will initialize guidance model from reference model")
+        
+        # Create BiLevel SCoRe trainer with all parameters
+        trainer = BiLevelSCoReTrainer(
+            agent=agent,
+            tokenizer=tokenizer,
+            accelerator=accelerator,
+            guidance_model=guidance_model,
+            guidance_lr=guidance_lr,
+            guidance_kl_coef=guidance_kl_coef,
+            train_guidance_model=train_guidance_model,
+            value_model_name=value_model_name,
+            value_lr=value_lr,
+            value_coef=value_coef,
+            stop_value_gradients=stop_value_gradients,
+            cache_dir=kwargs.get("cache_dir", None),
+            lm_lr=lm_lr,
+            grad_accum_steps=grad_accum_steps,
+            max_grad_norm=max_grad_norm,
+            alpha=alpha,
+            beta1=beta1,
+            beta2=beta2,
+            stage1_steps=stage1_steps,
+            stage2_steps=stage2_steps,
+            batch_size=batch_size
+        )
 
     # For non-SCoRe agents, we use a replay buffer
-    if agent_type.lower() != "score":
+    if agent_type.lower() not in ["score", "bi_level_score"]:
         replay_buffer = ReplayBuffer(batch_size=batch_size, capacity=capacity)
         all_trajectories = []
         
@@ -181,7 +227,7 @@ def offpolicy_train_loop(env,
                 print("Creating new checkpoint directory")
                 os.makedirs(save_path, exist_ok=True)
     else:
-        # For SCoRe, we don't need a replay buffer (on-policy)
+        # For SCoRe and BiLevel SCoRe, we don't need a replay buffer (on-policy)
         # Initialize variables for tracking best training reward
         best_train_reward = -float('inf')
         best_checkpoint_path = os.path.join(save_path, 'best_train_reward_checkpoint.pt')
@@ -205,8 +251,8 @@ def offpolicy_train_loop(env,
             # Collect training trajectories.
             print(f"Iter:{i}")
             
-            # For SCoRe, we need to gather two-turn trajectories
-            if agent_type.lower() == "score":
+            # For SCoRe and BiLevel SCoRe, we need to gather two-turn trajectories
+            if agent_type.lower() in ["score", "bi_level_score"]:
                 # First turn generation - use zero-shot math template
                 from archer.prompts.math import MATH_ZERO_SHOT_TEMPLATE
                 trajectories_turn1 = batch_interact_environment(
@@ -346,7 +392,7 @@ def offpolicy_train_loop(env,
                 old_sample = agent.do_sample
                 agent.do_sample = False
                 
-                if agent_type.lower() == "score":
+                if agent_type.lower() in ["score", "bi_level_score"]:
                     # First turn evaluation
                     eval_trajectories_turn1 = batch_interact_environment(
                         agent=agent,
@@ -429,7 +475,7 @@ def offpolicy_train_loop(env,
             info = {}
 
         # For non-SCoRe agents, we need to sync the replay buffer across processes
-        if agent_type.lower() != "score":
+        if agent_type.lower() not in ["score", "bi_level_score"]:
             accelerator.wait_for_everyone()
 
             # Reload trajectories and replay buffer to ensure consistency.
@@ -460,7 +506,7 @@ def offpolicy_train_loop(env,
         # Log metrics to WandB along with the current iteration.
         if use_wandb and accelerator.is_main_process:
             info["iteration"] = i + 1
-            if agent_type.lower() == "score":
+            if agent_type.lower() in ["score", "bi_level_score"]:
                 info["current_stage"] = trainer.current_stage
                 info["total_steps"] = trainer.total_steps
                 if "best_train_reward_so_far" not in info:
@@ -468,7 +514,7 @@ def offpolicy_train_loop(env,
             wandb.log(info)
 
     # At the end of training, print information about the best checkpoint
-    if agent_type.lower() == "score" and accelerator.is_main_process:
+    if agent_type.lower() in ["score", "bi_level_score"] and accelerator.is_main_process:
         print(f"\nTraining completed. Best training reward: {best_train_reward:.4f}")
         print(f"Best checkpoint saved at: {best_checkpoint_path}")
         
