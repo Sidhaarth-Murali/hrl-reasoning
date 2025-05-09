@@ -50,7 +50,7 @@ def batch_interact_environment(agent, tokenizer, env, num_trajectories,
     all_trajectories = []
     
     # Calculate optimal batch size - use a smaller batch size to avoid OOM
-    optimal_batch_size = min(bsize, 32)  # Limit max batch size to avoid OOM
+    optimal_batch_size = min(bsize, 128)  # Limit max batch size to avoid OOM
     
     # Process in as few batches as possible
     num_batches = (num_trajectories + optimal_batch_size - 1) // optimal_batch_size  # Ceiling division
@@ -60,7 +60,6 @@ def batch_interact_environment(agent, tokenizer, env, num_trajectories,
     
     trajectories_collected = 0
     correct_total = 0
-    
     # If a template is provided, update the agent's template
     if template is not None and hasattr(agent, 'update_template'):
         agent.update_template(template)
@@ -71,17 +70,12 @@ def batch_interact_environment(agent, tokenizer, env, num_trajectories,
         
         # Reset batch of environments without printing
         batch_obs = env.reset(idx=env_idx)
-        
-        # For the second turn of SCoRe, the environment history already contains the correction prompts
-        # Check if the environment has a method to get current histories
         if hasattr(env, 'get_current_histories'):
             batch_obs = env.get_current_histories()
         
-        # Add memory cleanup before model generation
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             
-        # Single step for each environment (SCoRe uses single-step trajectories)
         actions = agent.get_action(batch_obs)
         batch_results = env.step(decode_f(actions))
         
@@ -108,18 +102,14 @@ def batch_interact_environment(agent, tokenizer, env, num_trajectories,
         all_trajectories.extend(trajectories)
         trajectories_collected += len(trajectories)
         correct_total += total_correct
-        
-        # Update progress with overall stats
+
         pbar.update(len(trajectories))
-        
-        # Calculate global accuracy so far
         accuracy = correct_total / trajectories_collected if trajectories_collected else 0
         pbar.set_postfix({
             "Reward": f"{accuracy}",  
             "Overall": f"{correct_total}/{trajectories_collected}"
         })
         
-        # Add another memory cleanup after processing each batch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     

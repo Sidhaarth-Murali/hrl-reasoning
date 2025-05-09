@@ -248,8 +248,6 @@ def offpolicy_train_loop(env,
     print(">>> Start Iterations")
     for i in tqdm(range(iterations)):
         if accelerator.is_main_process:
-            # Collect training trajectories.
-            print(f"Iter:{i}")
             
             # For SCoRe and BiLevel SCoRe, we need to gather two-turn trajectories
             if agent_type.lower() in ["score", "bi_level_score"]:
@@ -271,16 +269,16 @@ def offpolicy_train_loop(env,
                 # NEW CODE: Use trainer's guidance generation functionality
                 problems = [traj[0]['observation'] for traj in trajectories_turn1]
                 solutions = [traj[0]['action'] for traj in trajectories_turn1]
-                
+
                 # Generate guidance via trainer's custom method
                 print("Generating guidance via trainer's custom method")
                 analysis_prompts, guidance_hints = trainer.generate_custom_guidance(
                     problems, solutions
                 )
-                
+
                 # Format correction templates
                 correction_templates = build_correction_templates(problems, solutions, guidance_hints)
-                
+
                 # Generate second turn with custom guidance
                 print("Generating second turn with custom guidance")
                 trajectories_turn2 = batch_interact_environment(
@@ -293,7 +291,7 @@ def offpolicy_train_loop(env,
                     decode_f=decode_f,
                     template=correction_templates
                 )
-                
+
                 # Verify we have processed all trajectories
                 assert len(trajectories_turn2) == len(trajectories_turn1), \
                     f"Expected {len(trajectories_turn1)} second-turn trajectories, but got {len(trajectories_turn2)}"
@@ -319,7 +317,7 @@ def offpolicy_train_loop(env,
                         "trajectory_reward": (t1[0]["trajectory_reward"] + t2[0]["trajectory_reward"]) / 2.0
                     }]
                     score_trajectories.append(traj_data)
-                
+
                 # Calculate combined training reward metrics
                 train_rewards = [d[0]["trajectory_reward"] for d in score_trajectories]
                 current_train_reward = np.mean(train_rewards)

@@ -11,7 +11,7 @@ from archer.models.critic import DoubleCritic
 class ArcherAgent(torch.nn.Module):
     def __init__(self, device, accelerator, policy_lm = "llama3.2", critic_lm = "roberta-base", 
                 cache_dir = '~/.cache', dropout = 0.5, TEMPLATE = None, use_lora=False,
-                do_sample = True, temperature = 0.9, max_new_tokens = 1024, use_bfloat16 = False, eos_str = '\n'):
+                do_sample = True, temperature = 0.9, max_new_tokens = 512, use_bfloat16 = False, eos_str = '\n'):
         super(ArcherAgent, self).__init__()
         if True:
             self.model = AutoModelForCausalLM.from_pretrained(policy_lm, cache_dir=cache_dir).to(device)

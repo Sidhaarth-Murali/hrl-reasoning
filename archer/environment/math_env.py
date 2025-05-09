@@ -191,7 +191,7 @@ class LLMBatchedMathEnv():
         cache_dir: str = '~/.cache',
         device = None,
         max_tokens: int=512,
-        bsize: int=1,  
+        bsize: int=2,  
         data_path: str=DEFAULT_DATASET_PATH,
         correction_model_path: str = None,  
         use_smart_corrections: bool = True, 

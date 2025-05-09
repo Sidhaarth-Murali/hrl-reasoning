@@ -42,7 +42,7 @@ class SCoReTrainer():
                  beta2: float = 0.1,                # KL coefficient for Stage I
                  stage1_steps: int = 1500,          # Number of training steps for Stage I
                  stage2_steps: int = 1500,          # Number of training steps for Stage II
-                 batch_size: int = 512):            # Batch size for training (512 for MATH per paper)
+                 batch_size: int = 128):            # Batch size for training (512 for MATH per paper)
         """
         Initialize the SCoRe trainer using pure REINFORCE with KL penalties.
         """

@@ -75,7 +75,7 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
             self.agent.model = orig
         return log_probs
 
-    def generate_custom_guidance(self, problems, initial_solutions, batch_size: int = 8):
+    def generate_custom_guidance(self, problems, initial_solutions, batch_size: int = 64):
         """
         Generate tailored guidance hints for each (problem, initial_solution) pair.
 
@@ -212,10 +212,11 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         rewards_tensor = torch.tensor(shaped_r, dtype=torch.float, device=device)
 
         # Log-probs under guidance model
+        self.guidance_model.train() # Ensure model is in training mode for log_prob calculation
         logp_tensor = self.calculate_guidance_log_probs(analysis_prompts, guidance_texts)
         # policy gradient loss
         policy_loss = -torch.mean(logp_tensor * rewards_tensor)    
-        kl_div = torch.tensor(0.0, device=device, requires_grad=True)
+        kl_div = torch.tensor(0.0, device=device, requires_grad=False) # Corrected placeholder for KL divergence
 
         kl_loss = self.guidance_kl_coef * kl_div
         total_loss = policy_loss + kl_loss
