@@ -75,7 +75,7 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
             self.agent.model = orig
         return log_probs
 
-    def generate_custom_guidance(self, problems, initial_solutions, batch_size: int = 64):
+    def generate_custom_guidance(self, problems, initial_solutions, batch_size: int = 16):
         """
         Generate tailored guidance hints for each (problem, initial_solution) pair.
 
