@@ -9,6 +9,7 @@ import logging
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from accelerate import Accelerator
+import wandb  # Import wandb
 
 from archer.environment import LLMBatchedMathEnv
 from archer.algorithms.offpolicy_train_loop import offpolicy_train_loop
@@ -27,6 +28,13 @@ def main(cfg: DictConfig):
     
     print("Configuration:")
     print(OmegaConf.to_yaml(cfg))
+
+    if cfg.use_wandb:
+        wandb.init(
+            project=cfg.project_name if hasattr(cfg, 'project_name') else "archer_math", 
+            name=cfg.run_name if hasattr(cfg, 'run_name') else "bi_level_score_run",
+            config=OmegaConf.to_container(cfg, resolve=True)  # Log the config
+        )
     
     # Set up accelerator
     accelerator = Accelerator(
@@ -83,7 +91,14 @@ def main(cfg: DictConfig):
     
     logger.info("Starting BiLevel SCoRe training...")
     
-    # Run training loop
+    separator = "=" * 80
+    mode = "FULL GRADIENT FLOW" if not cfg.stop_value_gradients else "STOP GRADIENT"
+    coef = cfg.value_coef
+    
+    print(f"\n{separator}")
+    print(f"\033[1m*** MODE: {mode} | Value Function parameter = {coef} ***\033[0m")
+    print(f"{separator}\n")
+
     offpolicy_train_loop(
         env=env,
         eval_env=eval_env,

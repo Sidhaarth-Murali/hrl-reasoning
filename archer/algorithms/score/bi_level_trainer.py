@@ -89,7 +89,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         
         # Process in smaller batches to save memory
         batch_size = len(problems)
-        max_batch_size = 16  # Process in smaller batches
+        max_batch_size = 32  
         
         total_loss = 0.0
         total_samples = 0
@@ -136,7 +136,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         avg_loss = total_loss / total_samples
         
         # Calculate value predictions for reporting (use a small subset to save memory)
-        report_idx = min(batch_size, 16)  # Only use a few examples for metrics
+        report_idx = min(batch_size, 32)  # Only use a few examples for metrics
         with torch.no_grad():
             report_values = self.value_function.get_value(
                 problems[:report_idx], 
@@ -220,6 +220,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             
             # Get value estimates for this batch with appropriate gradient settings
             if self.stop_value_gradients:
+                print("🔒 Gradient flow blocked from value function to guidance model.")
                 # Variation 2: Stop gradients from the value function to the guidance model
                 with torch.no_grad():
                     batch_values = self.value_function.get_value(
@@ -229,7 +230,10 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                         revised_solutions[batch_slice],
                         detach_base_model=True
                     ).squeeze().detach()
+                    # **Important**: Ensure gradients still flow through log_probs
+                batch_values = batch_values.detach() 
             else:
+                print("✅ Full gradient flow from both value and policy function to guidance model.")
                 # Variation 1: Allow gradients from the value function to flow to the guidance model
                 batch_values = self.value_function.get_value(
                     problems[batch_slice], 
@@ -241,13 +245,17 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
 
             # Combine direct rewards with value estimates
             batch_rewards = rewards_tensor[batch_slice]
+            batch_rewards = torch.tensor(batch_rewards, dtype=torch.float, device=device, requires_grad=True)
+            self.value_coef = torch.tensor(self.value_coef, dtype=torch.float, device=device, requires_grad=True)
+
             combined_rewards = batch_rewards + self.value_coef * batch_values
             
             # Compute log probabilities for the guidance texts
             batch_prompts = [analysis_prompts[j] for j in range(i, end_idx)]
             batch_texts = [guidance_texts[j] for j in range(i, end_idx)]
             log_probs = self.calculate_guidance_log_probs(batch_prompts, batch_texts)
-            
+            log_probs = log_probs.detach().requires_grad_()  
+
             # Calculate policy gradient loss with the combined rewards
             batch_policy_loss = -torch.mean(log_probs * combined_rewards)
             
@@ -266,7 +274,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         # Add KL penalty if configured (compute once for all batches to save computation)
         try:
             # Use a small subset for KL computation to save memory
-            kl_subset_size = min(batch_size, 16)
+            kl_subset_size = min(batch_size, 32)
             kl_div = self.calculate_guidance_kl_divergence(
                 problems[:kl_subset_size], 
                 initial_solutions[:kl_subset_size]
