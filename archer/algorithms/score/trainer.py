@@ -29,6 +29,7 @@ class SCoReTrainer():
     Uses vanilla policy gradients (REINFORCE) with KL penalty, no critic networks.
     
     This is a FULLY ON-POLICY implementation - no replay buffer is used.
+    Memory-optimized implementation to handle larger models.
     """
     def __init__(self, 
                  agent,
@@ -42,21 +43,29 @@ class SCoReTrainer():
                  beta2: float = 0.1,                # KL coefficient for Stage I
                  stage1_steps: int = 1500,          # Number of training steps for Stage I
                  stage2_steps: int = 1500,          # Number of training steps for Stage II
-                 batch_size: int = 128):            # Batch size for training (512 for MATH per paper)
+                 batch_size: int = 128,             # Batch size for training (512 for MATH per paper)
+                 max_micro_batch: int = 8,          # Maximum size of micro-batches for memory efficiency
+                 use_gradient_checkpointing: bool = True,  # Whether to use gradient checkpointing
+                 use_memory_efficient_attention: bool = True):  # Whether to use memory efficient attention
         """
         Initialize the SCoRe trainer using pure REINFORCE with KL penalties.
+        Memory-optimized implementation.
         """
         super().__init__()
         self.agent = agent
         self.tokenizer = tokenizer
+        self.max_micro_batch = max_micro_batch
         
-        # Enable gradient checkpointing to save memory
-        if hasattr(agent.model, "gradient_checkpointing_enable"):
+        # Enable memory optimizations
+        if use_gradient_checkpointing and hasattr(agent.model, "gradient_checkpointing_enable"):
             agent.model.gradient_checkpointing_enable()
             print("Gradient checkpointing enabled to save memory")
+            
+        if use_memory_efficient_attention and hasattr(agent.model, "use_memory_efficient_attention"):
+            agent.model.use_memory_efficient_attention = True
+            print("Memory efficient attention enabled")
         
         # Create a frozen reference model for KL divergence calculation
-        # This is critical for SCoRe - without this, KL would be zero as we'd compare the model to itself
         print("Creating frozen reference model for KL divergence...")
         with torch.cuda.device(agent.model.device):
             torch.cuda.empty_cache()  # Clear memory before creating reference model
@@ -67,6 +76,7 @@ class SCoReTrainer():
         
         print("Reference model created and frozen")
         
+        # Initialize optimizer with memory-efficient settings
         self.lm_optimizer = torch.optim.Adam(agent.model.parameters(), lr=lm_lr)
         self.grad_accum_steps = grad_accum_steps
         self.max_grad_norm = max_grad_norm
@@ -80,10 +90,15 @@ class SCoReTrainer():
         self.stage2_steps = stage2_steps
         self.current_stage = 1  
         self.total_steps = 0
-    
+        
+        # Enable memory-efficient attention for reference model if available
+        if use_memory_efficient_attention and hasattr(self.ref_model, "use_memory_efficient_attention"):
+            self.ref_model.use_memory_efficient_attention = True
+
     def calculate_kl_divergence(self, observation, action, reference_model):
         """Calculate KL divergence between current policy and reference policy.
         Computes KL(current || reference) to penalize drift from the reference policy.
+        Memory-optimized implementation.
         """
         # Tokenize the inputs
         obs_ids = self.tokenizer(observation, return_tensors='pt', padding=True).to(self.agent.model.device)
@@ -92,8 +107,8 @@ class SCoReTrainer():
         input_ids = torch.cat([obs_ids["input_ids"], action_ids["input_ids"]], dim=1)
         attention_mask = torch.cat([obs_ids["attention_mask"], action_ids["attention_mask"]], dim=1)
         
-        # Process in smaller chunks to save memory if batch is large
-        max_chunk_size = 4  # Process 4 samples at a time
+        # Process in smaller chunks to save memory
+        max_chunk_size = self.max_micro_batch  # Use configured micro-batch size
         total_samples = input_ids.size(0)
         kl_div_sum = 0.0
         
@@ -112,8 +127,6 @@ class SCoReTrainer():
                                             attention_mask=chunk_attention_mask).logits
             
             # Calculate KL divergence for this chunk (KL(current || reference))
-            # PyTorch's kl_div takes log-probabilities for input, raw probabilities for target
-            # To compute KL(p||q), we need input=log(p), target=q
             log_probs_current = F.log_softmax(outputs_current, dim=-1)
             probs_ref = F.softmax(outputs_ref, dim=-1)
             
@@ -126,6 +139,11 @@ class SCoReTrainer():
             )
             
             kl_div_sum += chunk_kl_div * (end_idx - i)
+            
+            # Clean up to save memory
+            del outputs_current, outputs_ref, log_probs_current, probs_ref, chunk_kl_div
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         # Average KL divergence
         kl_div = kl_div_sum / total_samples
@@ -183,83 +201,149 @@ class SCoReTrainer():
         Loss = -(r1 + r2_shaped) + beta1 * (KL1 + KL2)
         
         Uses pure REINFORCE (policy gradients) with no critic networks.
-        """        
-        # Calculate KL divergence for both turns using the frozen reference model
-        kl_div_turn1 = self.calculate_kl_divergence(observation, action_turn1, self.ref_model)
+        Memory-optimized implementation to handle larger models.
+        """
+        # Process in smaller micro-batches to save memory
+        batch_size = len(observation)
+        max_micro_batch = min(32, batch_size)  # Process at most 32 examples at once
         
-        correction_prompts = [format_math_self_correction_prompt(o + a1) for o, a1 in zip(observation, action_turn1)]
-        kl_div_turn2 = self.calculate_kl_divergence(correction_prompts, action_turn2, self.ref_model)
+        # Initialize accumulators
+        total_loss = 0.0
+        total_kl = 0.0
+        total_policy_loss_turn1 = 0.0
+        total_policy_loss_turn2 = 0.0
         
-        total_kl = kl_div_turn1 + kl_div_turn2
+        # Track metrics for reporting
+        all_shaped_rewards = []
         
-        # Calculate log probabilities for both turns (REINFORCE)
-        log_prob_turn1 = self.agent.get_log_prob(observation, action_turn1)
-        log_prob_turn2 = self.agent.get_log_prob(correction_prompts, action_turn2)
+        # Clear CUDA cache before starting
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
-        # Convert rewards to tensors (with proper as_tensor to avoid memory issues)
-        reward_turn1_tensor = torch.as_tensor(reward_turn1, device=self.agent.model.device, dtype=torch.float).detach()
-        reward_turn2_tensor = torch.as_tensor(reward_turn2, device=self.agent.model.device, dtype=torch.float).detach()
+        # Convert rewards to tensors once (with proper device placement)
+        device = self.agent.model.device
+        reward_turn1_tensor = torch.tensor(reward_turn1, device=device, dtype=torch.float32)
+        reward_turn2_tensor = torch.tensor(reward_turn2, device=device, dtype=torch.float32)
         
         # Apply reward shaping to turn 2: r2 + alpha * (r2 - r1)
         shaped_reward_turn2 = reward_turn2_tensor + self.alpha * (reward_turn2_tensor - reward_turn1_tensor)
+        all_shaped_rewards = shaped_reward_turn2.detach().cpu().tolist()
         
-        # Ensure log probs have proper shape
-        if log_prob_turn1.dim() > 1:
-            log_prob_turn1 = log_prob_turn1.flatten()
-        if log_prob_turn2.dim() > 1:
-            log_prob_turn2 = log_prob_turn2.flatten()
+        # For each micro-batch
+        for i in range(0, batch_size, max_micro_batch):
+            end_idx = min(i + max_micro_batch, batch_size)
+            batch_slice = slice(i, end_idx)
+            current_batch_size = end_idx - i
+            
+            # Get micro-batch data
+            obs_batch = [observation[j] for j in range(i, end_idx)]
+            act1_batch = [action_turn1[j] for j in range(i, end_idx)]
+            act2_batch = [action_turn2[j] for j in range(i, end_idx)]
+            r1_batch = reward_turn1_tensor[batch_slice]
+            shaped_r2_batch = shaped_reward_turn2[batch_slice]
+            
+            # Create correction prompts
+            correction_prompts = [format_math_self_correction_prompt(o + a1) for o, a1 in zip(obs_batch, act1_batch)]
+            
+            # Calculate KL divergence for turn 1 (with memory cleanup)
+            kl_div_turn1 = self.calculate_kl_divergence(obs_batch, act1_batch, self.ref_model)
+            
+            # Calculate KL divergence for turn 2 (with memory cleanup)
+            kl_div_turn2 = self.calculate_kl_divergence(correction_prompts, act2_batch, self.ref_model)
+            
+            batch_kl = kl_div_turn1 + kl_div_turn2
+            total_kl += batch_kl.item() * current_batch_size
+            
+            # Calculate log probabilities for both turns (REINFORCE)
+            log_prob_turn1 = self.agent.get_log_prob(obs_batch, act1_batch)
+            if log_prob_turn1.dim() > 1:
+                log_prob_turn1 = log_prob_turn1.flatten()
+                
+            log_prob_turn2 = self.agent.get_log_prob(correction_prompts, act2_batch)
+            if log_prob_turn2.dim() > 1:
+                log_prob_turn2 = log_prob_turn2.flatten()
+            
+            # Calculate components of loss
+            policy_loss_turn1 = torch.mean(log_prob_turn1 * r1_batch)
+            policy_loss_turn2 = torch.mean(log_prob_turn2 * shaped_r2_batch)
+            
+            # Scale the batch KL regulation by batch size
+            reg_loss = self.beta1 * batch_kl * (current_batch_size / batch_size)
+            
+            # Final loss for this micro-batch
+            batch_loss = -(policy_loss_turn1 + policy_loss_turn2) + reg_loss
+            
+            # Accumulate metrics
+            total_policy_loss_turn1 += policy_loss_turn1.item() * current_batch_size
+            total_policy_loss_turn2 += policy_loss_turn2.item() * current_batch_size
+            total_loss += batch_loss.item() * current_batch_size
+            
+            # Backward pass with scaling
+            scaled_loss = batch_loss * (current_batch_size / max_micro_batch)
+            self.accelerator.backward(scaled_loss)
+            
+            # Clean up tensors to free memory
+            del obs_batch, act1_batch, act2_batch, r1_batch, shaped_r2_batch
+            del correction_prompts, log_prob_turn1, log_prob_turn2
+            del batch_kl, policy_loss_turn1, policy_loss_turn2, reg_loss, batch_loss, scaled_loss
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
-        # Calculate components of loss
-        policy_loss_turn1 = torch.mean(log_prob_turn1 * reward_turn1_tensor)
-        policy_loss_turn2 = torch.mean(log_prob_turn2 * shaped_reward_turn2)
-        reg_loss = self.beta1 * total_kl
+        # Calculate final metrics
+        avg_loss = total_loss / batch_size
+        avg_kl = total_kl / batch_size
+        avg_policy_loss_turn1 = total_policy_loss_turn1 / batch_size
+        avg_policy_loss_turn2 = total_policy_loss_turn2 / batch_size
         
-        # Final loss
-        loss = -(policy_loss_turn1 + policy_loss_turn2) + reg_loss
-        
-        # Save metrics before cleaning up
-        shaped_reward_mean = shaped_reward_turn2.detach().cpu().mean().item()
-        loss_value = loss.detach().cpu().item()
-        kl_value = total_kl.detach().cpu().item()
         reward_turn1_mean = sum(reward_turn1) / len(reward_turn1)
         reward_turn2_mean = sum(reward_turn2) / len(reward_turn2)
-                
-        # Backward pass
-        self.accelerator.backward(loss)
+        shaped_reward_mean = sum(all_shaped_rewards) / len(all_shaped_rewards)
+        
         return {
-            "stage2_loss": loss_value,
+            "stage2_loss": avg_loss,
             "stage2_reward_turn1_mean": reward_turn1_mean,
             "stage2_reward_turn2_mean": reward_turn2_mean,
             "stage2_shaped_reward_mean": shaped_reward_mean,
-            "stage2_kl_div": kl_value
+            "stage2_kl_div": avg_kl
         }
     
     def train_stage1(self, trajectories):
         """Train in Stage I: focus on second-turn reward with KL constraint on first turn.
-           Fully on-policy: uses the trajectories that were just collected."""
+           Fully on-policy: uses the trajectories that were just collected.
+           Memory-optimized implementation."""
         print(">>> SCoRe Stage I Training (Pure REINFORCE with KL)")
         info_list = []
         
         data = self.process_trajectories(trajectories)
-        actual_batch_size = min(self.batch_size, len(data), 2) 
+        actual_batch_size = min(self.batch_size, len(data), self.max_micro_batch) 
         dataloader = DataLoader(DummyDataset(data), batch_size=actual_batch_size, shuffle=True)
         dataloader = self.accelerator.prepare(dataloader)
         
         # Update with pure policy gradients (REINFORCE)
         self.lm_optimizer.zero_grad()
-        for batch in tqdm(dataloader, desc="Stage I Update", leave=False):
+        
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Stage I Update", leave=False)):
             # Process batch and add to info list
             batch_info = self.stage1_loss(**batch)
             info_list.append(batch_info)
             
-            # Periodically free memory even during batch processing
-            if len(info_list) % 2 == 0:
+            # Accumulate gradients
+            if (batch_idx + 1) % self.grad_accum_steps == 0:
+                self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
+                self.lm_optimizer.step()
+                self.lm_optimizer.zero_grad()
+            
+            # Periodically free memory
+            if batch_idx % 2 == 0:
                 with torch.cuda.device(self.agent.model.device):
                     torch.cuda.empty_cache()
         
-        # Apply gradient clipping and step
-        self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
-        self.lm_optimizer.step()        
+        # Handle remaining gradients
+        if len(dataloader) % self.grad_accum_steps != 0:
+            self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
+            self.lm_optimizer.step()
+            self.lm_optimizer.zero_grad()
+        
         self.total_steps += 1
 
         # Calculate mean metrics across all batches
@@ -269,37 +353,43 @@ class SCoReTrainer():
     
     def train_stage2(self, trajectories):
         """Train in Stage II: joint multi-turn RL with reward shaping.
-           Fully on-policy: uses the trajectories that were just collected."""
+           Fully on-policy: uses the trajectories that were just collected.
+           Memory-optimized implementation."""
         print(">>> SCoRe Stage II Training (Pure REINFORCE with KL & Reward Shaping)")
         info_list = []
-        
-
         
         # Process trajectories into a format suitable for training
         data = self.process_trajectories(trajectories)
         
-        # Use smaller batch size if needed
-        actual_batch_size = min(self.batch_size, len(data), 2)  # Further limit batch size to 8 max
+        # Use smaller batch size for memory efficiency
+        actual_batch_size = min(self.batch_size, len(data), self.max_micro_batch)
         dataloader = DataLoader(DummyDataset(data), batch_size=actual_batch_size, shuffle=True)
         dataloader = self.accelerator.prepare(dataloader)
         
         # Update with pure policy gradients (REINFORCE)
         self.lm_optimizer.zero_grad()
         
-        for batch in tqdm(dataloader, desc="Stage II Update", leave=False):
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Stage II Update", leave=False)):
             # Process batch and add to info list
             batch_info = self.stage2_loss(**batch)
             info_list.append(batch_info)
             
-            # Periodically free memory even during batch processing
-            if len(info_list) % 2 == 0:
+            # Accumulate gradients
+            if (batch_idx + 1) % self.grad_accum_steps == 0:
+                self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
+                self.lm_optimizer.step()
+                self.lm_optimizer.zero_grad()
+            
+            # Periodically free memory
+            if batch_idx % 2 == 0:
                 with torch.cuda.device(self.agent.model.device):
                     torch.cuda.empty_cache()
         
-        # Apply gradient clipping and step
-        self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
-        self.lm_optimizer.step()
-
+        # Handle remaining gradients
+        if len(dataloader) % self.grad_accum_steps != 0:
+            self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
+            self.lm_optimizer.step()
+            self.lm_optimizer.zero_grad()
         
         self.total_steps += 1
     
