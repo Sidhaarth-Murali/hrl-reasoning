@@ -24,6 +24,14 @@ do_sample: true
 use_lora: true
 huggingface_token: "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"
 
+# memory optimization settings
+use_gradient_checkpointing: true
+use_memory_efficient_attention: true
+use_8bit_optimizers: true
+use_bf16_mixed_precision: true
+max_micro_batch_size: 8
+gradient_accumulation_steps: 16
+
 # training hyperparameters
 capacity: 100000      # Replay buffer size
 rollout_size: 128     # Number of parallel environments
