@@ -98,57 +98,98 @@ class SCoReTrainer():
     def calculate_kl_divergence(self, observation, action, reference_model):
         """Calculate KL divergence between current policy and reference policy.
         Computes KL(current || reference) to penalize drift from the reference policy.
-        Memory-optimized implementation.
+        Memory-optimized implementation with improved chunking and cleanup.
         """
-        # Tokenize the inputs
-        obs_ids = self.tokenizer(observation, return_tensors='pt', padding=True).to(self.agent.model.device)
-        action_ids = self.tokenizer(action, return_tensors='pt', padding=True).to(self.agent.model.device)
-        
-        input_ids = torch.cat([obs_ids["input_ids"], action_ids["input_ids"]], dim=1)
-        attention_mask = torch.cat([obs_ids["attention_mask"], action_ids["attention_mask"]], dim=1)
-        
-        # Process in smaller chunks to save memory
-        max_chunk_size = self.max_micro_batch  # Use configured micro-batch size
-        total_samples = input_ids.size(0)
+        # Process in very small chunks to minimize memory usage
+        max_chunk_size = 4  # Reduced from previous value for more granular processing
+        total_samples = len(observation) if isinstance(observation, list) else 1
         kl_div_sum = 0.0
+        total_tokens = 0
         
+        # Convert single inputs to lists for consistent processing
+        if not isinstance(observation, list):
+            observation = [observation]
+            action = [action]
+            
         for i in range(0, total_samples, max_chunk_size):
             end_idx = min(i + max_chunk_size, total_samples)
-            chunk_input_ids = input_ids[i:end_idx]
-            chunk_attention_mask = attention_mask[i:end_idx]
+            chunk_obs = observation[i:end_idx]
+            chunk_act = action[i:end_idx]
             
-            # Get logits from current model WITH gradients enabled
-            outputs_current = self.agent.model(input_ids=chunk_input_ids, 
-                                             attention_mask=chunk_attention_mask).logits
+            # Tokenize the inputs for this small chunk
+            obs_ids = self.tokenizer(chunk_obs, return_tensors='pt', padding=True, truncation=True, max_length=512)
+            act_ids = self.tokenizer(chunk_act, return_tensors='pt', padding=True, truncation=True, max_length=512)
             
-            # Get logits from reference model WITHOUT gradients
-            with torch.no_grad():
-                outputs_ref = reference_model(input_ids=chunk_input_ids, 
-                                            attention_mask=chunk_attention_mask).logits
+            # Move to device
+            obs_ids = {k: v.to(self.agent.model.device) for k, v in obs_ids.items()}
+            act_ids = {k: v.to(self.agent.model.device) for k, v in act_ids.items()}
             
-            # Calculate KL divergence for this chunk (KL(current || reference))
-            log_probs_current = F.log_softmax(outputs_current, dim=-1)
-            probs_ref = F.softmax(outputs_ref, dim=-1)
+            input_ids = torch.cat([obs_ids["input_ids"], act_ids["input_ids"]], dim=1)
+            attention_mask = torch.cat([obs_ids["attention_mask"], act_ids["attention_mask"]], dim=1)
             
-            # KL divergence: KL(current || reference)
-            chunk_kl_div = F.kl_div(
-                input=log_probs_current,
-                target=probs_ref,
-                reduction='batchmean',
-                log_target=False
-            )
+            # Process tokens in smaller sub-chunks if sequence is long
+            seq_length = input_ids.size(1)
+            max_seq_chunk = 128  # Process sequence in smaller chunks
             
-            kl_div_sum += chunk_kl_div * (end_idx - i)
+            chunk_kl_div = 0.0
+            chunk_tokens = 0
             
-            # Clean up to save memory
-            del outputs_current, outputs_ref, log_probs_current, probs_ref, chunk_kl_div
-            if torch.cuda.is_available():
+            for seq_start in range(0, seq_length, max_seq_chunk):
+                seq_end = min(seq_start + max_seq_chunk, seq_length)
+                
+                # Get sequence chunk
+                chunk_input_ids = input_ids[:, seq_start:seq_end]
+                chunk_attention_mask = attention_mask[:, seq_start:seq_end]
+                
+                # Get logits from current model WITH gradients enabled
+                outputs_current = self.agent.model(
+                    input_ids=chunk_input_ids,
+                    attention_mask=chunk_attention_mask
+                ).logits
+                
+                # Get logits from reference model WITHOUT gradients
+                with torch.no_grad():
+                    outputs_ref = reference_model(
+                        input_ids=chunk_input_ids,
+                        attention_mask=chunk_attention_mask
+                    ).logits
+                
+                # Calculate KL divergence for this sub-chunk
+                log_probs_current = F.log_softmax(outputs_current, dim=-1)
+                probs_ref = F.softmax(outputs_ref, dim=-1)
+                
+                # Compute KL divergence with memory-efficient operations
+                sub_chunk_kl = F.kl_div(
+                    input=log_probs_current.float(),  # Ensure float32
+                    target=probs_ref.float(),        # Ensure float32
+                    reduction='none',                # No reduction to save memory
+                    log_target=False
+                )
+                
+                # Sum over vocabulary dimension first
+                sub_chunk_kl = sub_chunk_kl.sum(dim=-1)  # Sum over vocab
+                
+                # Apply attention mask and get mean
+                valid_tokens = chunk_attention_mask.sum().item()
+                sub_chunk_kl = (sub_chunk_kl * chunk_attention_mask).sum() / valid_tokens
+                
+                chunk_kl_div += sub_chunk_kl.item()
+                chunk_tokens += valid_tokens
+                
+                # Clean up GPU memory
+                del outputs_current, outputs_ref, log_probs_current, probs_ref, sub_chunk_kl
                 torch.cuda.empty_cache()
+            
+            # Accumulate KL divergence weighted by number of tokens
+            kl_div_sum += chunk_kl_div * chunk_tokens
+            total_tokens += chunk_tokens
+            
+            # Clean up chunk tensors
+            del obs_ids, act_ids, input_ids, attention_mask
+            torch.cuda.empty_cache()
         
-        # Average KL divergence
-        kl_div = kl_div_sum / total_samples
-        
-        return kl_div
+        # Return average KL divergence across all tokens
+        return torch.tensor(kl_div_sum / total_tokens, device=self.agent.model.device)
     
     def stage1_loss(self, observation, action_turn1, action_turn2, reward_turn1, reward_turn2, **kwargs):
         """
@@ -307,12 +348,23 @@ class SCoReTrainer():
             "stage2_kl_div": avg_kl
         }
     
+    def clear_gpu_cache(self):
+        """Helper method to clear GPU cache and force garbage collection"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        import gc
+        gc.collect()
+
     def train_stage1(self, trajectories):
         """Train in Stage I: focus on second-turn reward with KL constraint on first turn.
            Fully on-policy: uses the trajectories that were just collected.
            Memory-optimized implementation."""
         print(">>> SCoRe Stage I Training (Pure REINFORCE with KL)")
         info_list = []
+        
+        # Clear cache before training
+        self.clear_gpu_cache()
         
         data = self.process_trajectories(trajectories)
         actual_batch_size = min(self.batch_size, len(data), self.max_micro_batch) 
@@ -332,23 +384,27 @@ class SCoReTrainer():
                 self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
                 self.lm_optimizer.step()
                 self.lm_optimizer.zero_grad()
+                # Clear cache after optimizer step
+                self.clear_gpu_cache()
             
             # Periodically free memory
             if batch_idx % 2 == 0:
-                with torch.cuda.device(self.agent.model.device):
-                    torch.cuda.empty_cache()
+                self.clear_gpu_cache()
         
         # Handle remaining gradients
         if len(dataloader) % self.grad_accum_steps != 0:
             self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
             self.lm_optimizer.step()
             self.lm_optimizer.zero_grad()
+            self.clear_gpu_cache()
         
         self.total_steps += 1
 
         # Calculate mean metrics across all batches
         result = dict_mean(info_list)
         
+        # Final cache clear
+        self.clear_gpu_cache()
         return result
     
     def train_stage2(self, trajectories):
@@ -357,6 +413,9 @@ class SCoReTrainer():
            Memory-optimized implementation."""
         print(">>> SCoRe Stage II Training (Pure REINFORCE with KL & Reward Shaping)")
         info_list = []
+        
+        # Clear cache before training
+        self.clear_gpu_cache()
         
         # Process trajectories into a format suitable for training
         data = self.process_trajectories(trajectories)
@@ -379,17 +438,19 @@ class SCoReTrainer():
                 self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
                 self.lm_optimizer.step()
                 self.lm_optimizer.zero_grad()
+                # Clear cache after optimizer step
+                self.clear_gpu_cache()
             
             # Periodically free memory
             if batch_idx % 2 == 0:
-                with torch.cuda.device(self.agent.model.device):
-                    torch.cuda.empty_cache()
+                self.clear_gpu_cache()
         
         # Handle remaining gradients
         if len(dataloader) % self.grad_accum_steps != 0:
             self.accelerator.clip_grad_norm_(self.agent.model.parameters(), self.max_grad_norm)
             self.lm_optimizer.step()
             self.lm_optimizer.zero_grad()
+            self.clear_gpu_cache()
         
         self.total_steps += 1
     
@@ -403,6 +464,8 @@ class SCoReTrainer():
         # Calculate mean metrics across all batches
         result = dict_mean(info_list)
         
+        # Final cache clear
+        self.clear_gpu_cache()
         return result
     
     def process_trajectories(self, trajectories):
@@ -458,15 +521,24 @@ class SCoReTrainer():
     
     def save(self, path):
         """Save the model state."""
+        # Clear cache before saving
+        self.clear_gpu_cache()
+        
         torch.save({
             'model_state_dict': self.accelerator.unwrap_model(self.agent.model).state_dict(),
             'lm_optimizer_state_dict': self.lm_optimizer.state_dict(),
             'current_stage': self.current_stage,
             'total_steps': self.total_steps
         }, path)
+        
+        # Clear cache after saving
+        self.clear_gpu_cache()
     
     def load(self, path):
         """Load the model state."""
+        # Clear cache before loading
+        self.clear_gpu_cache()
+        
         checkpoint = torch.load(path)
         self.agent.model.load_state_dict(checkpoint['model_state_dict'])
         self.lm_optimizer.load_state_dict(checkpoint['lm_optimizer_state_dict'])
@@ -476,5 +548,7 @@ class SCoReTrainer():
             self.current_stage = checkpoint['current_stage']
         if 'total_steps' in checkpoint:
             self.total_steps = checkpoint['total_steps']
-        
+            
+        # Clear cache after loading
+        self.clear_gpu_cache()
         return self.agent

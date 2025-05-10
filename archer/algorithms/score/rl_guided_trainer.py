@@ -121,17 +121,11 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
     def generate_custom_guidance(self, problems, initial_solutions, batch_size: int = 8):
         """
         Generate tailored guidance hints for each (problem, initial_solution) pair.
-        Memory-optimized implementation.
-
-        Args:
-            problems (Union[str, List[str]]):  Single problem or list of problems.
-            initial_solutions (Union[str, List[str]]):  Single draft solution or list of solutions.
-            batch_size (int, optional):  # items processed per forward‑pass (controls VRAM).  Default = 8.
-
-        Returns:
-            Tuple[List[str], List[str]]  →  (analysis_prompts, guidance_texts)  **or**
-            Tuple[str, str]              →  when a single problem/solution is given.
+        Memory-optimized implementation with careful cache management.
         """
+        # Safe to clear before starting new generation
+        self.clear_gpu_cache()
+        
         import torch
         from tqdm import tqdm
 
@@ -175,6 +169,9 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
                 ]
                 analysis_prompts.extend(batch_prompts)
 
+                # Safe to clear before tokenization
+                self.clear_gpu_cache()
+
                 # ----- tokenise with memory optimization -----
                 inputs = self.tokenizer(
                     batch_prompts,
@@ -198,18 +195,17 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
                         use_cache=True,
                     )
 
-                # ----- decode JUST the generated portion (strip input) -----
-                input_lens = [len(ids) for ids in inputs["input_ids"]]
-                for j, seq in enumerate(outputs):
-                    instr = self.tokenizer.decode(
-                        seq[input_lens[j]:], skip_special_tokens=True
-                    ).strip()
-                    guidance_texts.append(instr)
+                    # ----- decode JUST the generated portion (strip input) -----
+                    input_lens = [len(ids) for ids in inputs["input_ids"]]
+                    for j, seq in enumerate(outputs):
+                        instr = self.tokenizer.decode(
+                            seq[input_lens[j]:], skip_special_tokens=True
+                        ).strip()
+                        guidance_texts.append(instr)
 
-                # ----- tidy up GPU memory -----
+                # Only clear after we've processed the outputs
                 del inputs, outputs
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                self.clear_gpu_cache()
 
         except Exception as e:
             # any failure → gracefully fall back to static template generation
@@ -226,6 +222,9 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         # ---------- shape of return matches shape of input ----------
         if not is_batch:
             return analysis_prompts[0], guidance_texts[0]
+            
+        # Safe to clear before returning
+        self.clear_gpu_cache()
         return analysis_prompts, guidance_texts
 
     def calculate_guidance_log_probs(self, analysis_prompts, guidance_texts):
@@ -238,10 +237,13 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
     def train_guidance(self, trajectories):
         """
         Train the guidance model using REINFORCE.
-        Memory-optimized implementation.
+        Memory-optimized implementation with regular cache clearing.
         """
         if not self.train_guidance_model:
             return {}
+
+        # Clear cache before starting
+        self.clear_gpu_cache()
 
         # Extract data
         problems = [t[0]['observation'] for t in trajectories]
@@ -256,6 +258,9 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         guidance_texts = []
         
         for i in range(0, batch_size, max_guidance_batch):
+            # Clear cache at start of each batch
+            self.clear_gpu_cache()
+            
             end_idx = min(i + max_guidance_batch, batch_size)
             batch_slice = slice(i, end_idx)
             
@@ -268,8 +273,7 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
             guidance_texts.extend(batch_guidance)
             
             # Clean up to save memory
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            self.clear_gpu_cache()
                 
         if not guidance_texts:
             return {'guidance_loss': 0.0}
@@ -286,6 +290,9 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         self.guidance_optimizer.zero_grad()
         
         for i in range(0, batch_size, max_guidance_batch):
+            # Clear cache at start of each batch
+            self.clear_gpu_cache()
+            
             end_idx = min(i + max_guidance_batch, batch_size)
             batch_slice = slice(i, end_idx)
             current_batch_size = end_idx - i
@@ -311,8 +318,7 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
             
             # Clean up to save memory
             del batch_prompts, batch_texts, batch_rewards, logp_tensor, batch_policy_loss, scaled_loss
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            self.clear_gpu_cache()
         
         # Update the guidance model after processing all batches
         self.accelerator.clip_grad_norm_(self.guidance_model.parameters(), self.max_grad_norm)
@@ -320,6 +326,9 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         
         # Calculate average loss
         avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+
+        # Final cache clear
+        self.clear_gpu_cache()
 
         return {
             'guidance_loss': avg_loss,

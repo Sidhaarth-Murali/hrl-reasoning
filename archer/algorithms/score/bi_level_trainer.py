@@ -81,8 +81,11 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
     def train_value_function(self, problems, initial_solutions, guidance_texts, revised_solutions, rewards):
         """
         Train the value function to predict the reward at turn 2.
-        Memory-optimized implementation.
+        Memory-optimized implementation with careful cache management.
         """
+        # Safe to clear cache before starting
+        self.clear_gpu_cache()
+        
         # Convert rewards to tensor
         device = self.agent.model.device
         rewards_tensor = torch.tensor(rewards, dtype=torch.float, device=device)
@@ -94,9 +97,8 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         total_loss = 0.0
         total_samples = 0
         
-        # Clear CUDA cache before training
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Zero gradients at the start
+        self.value_optimizer.zero_grad()
         
         for i in range(0, batch_size, max_batch_size):
             end_idx = min(i + max_batch_size, batch_size)
@@ -117,15 +119,17 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             
             # Scale loss by batch size and accumulate
             scaled_loss = batch_loss * current_batch_size / max_batch_size
+            
+            # Backward pass
             self.accelerator.backward(scaled_loss)
             
             total_loss += batch_loss.item() * current_batch_size
             total_samples += current_batch_size
             
-            # Clean up to save memory
+            # Only clear cache after backward pass is complete
+            # and we've saved any values we need
             del values, batch_rewards, batch_loss, scaled_loss
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            self.clear_gpu_cache()
         
         # Update the value function after processing all batches
         self.accelerator.clip_grad_norm_(self.value_function.parameters(), self.max_grad_norm)
@@ -135,29 +139,40 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         # Calculate average loss
         avg_loss = total_loss / total_samples
         
+        # Safe to clear cache before new forward pass
+        self.clear_gpu_cache()
+        
         # Calculate value predictions for reporting (use a small subset to save memory)
         report_idx = min(batch_size, 32)  # Only use a few examples for metrics
-        with torch.no_grad():
+        with torch.no_grad():  # Ensure we don't track gradients for reporting
             report_values = self.value_function.get_value(
                 problems[:report_idx], 
                 initial_solutions[:report_idx], 
                 guidance_texts[:report_idx], 
                 revised_solutions[:report_idx]
             ).squeeze()
+            
+            metrics = {
+                'value_loss': avg_loss,
+                'value_mean': report_values.mean().item(),
+                'reward_mean': rewards_tensor[:report_idx].mean().item(),
+            }
         
-        return {
-            'value_loss': avg_loss,
-            'value_mean': report_values.mean().item(),
-            'reward_mean': rewards_tensor[:report_idx].mean().item(),
-        }
+        # Safe to clear at the end after all computations
+        self.clear_gpu_cache()
+        
+        return metrics
 
     def train_guidance(self, trajectories):
         """
         Train the guidance model with the bilevel optimization approach.
-        Memory-optimized implementation.
+        Memory-optimized implementation with careful cache management.
         """
         if not self.train_guidance_model:
             return {}
+
+        # Safe to clear cache before starting new training
+        self.clear_gpu_cache()
 
         # Extract data
         problems = [t[0]['observation'] for t in trajectories]
@@ -184,9 +199,8 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             analysis_prompts.extend(batch_analysis)
             guidance_texts.extend(batch_guidance)
             
-            # Clean up to save memory
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Safe to clear after extending lists
+            self.clear_gpu_cache()
                 
         if not guidance_texts:
             return {'guidance_loss': 0.0}
@@ -206,6 +220,9 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             shaped_rewards
         )
 
+        # Safe to clear before policy gradient computation
+        self.clear_gpu_cache()
+
         # Compute policy gradient in batches to save memory
         max_pg_batch = 16  # Process policy gradient in smaller batches
         total_policy_loss = 0.0
@@ -221,7 +238,6 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             # Get value estimates for this batch with appropriate gradient settings
             if self.stop_value_gradients:
                 print("🔒 Gradient flow blocked from value function to guidance model.")
-                # Variation 2: Stop gradients from the value function to the guidance model
                 with torch.no_grad():
                     batch_values = self.value_function.get_value(
                         problems[batch_slice], 
@@ -230,11 +246,9 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                         revised_solutions[batch_slice],
                         detach_base_model=True
                     ).squeeze().detach()
-                    # **Important**: Ensure gradients still flow through log_probs
                 batch_values = batch_values.detach() 
             else:
                 print("✅ Full gradient flow from both value and policy function to guidance model.")
-                # Variation 1: Allow gradients from the value function to flow to the guidance model
                 batch_values = self.value_function.get_value(
                     problems[batch_slice], 
                     initial_solutions[batch_slice], 
@@ -266,10 +280,12 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             total_policy_loss += batch_policy_loss.item() * current_batch_size
             total_samples += current_batch_size
             
-            # Clean up to save memory
+            # Only clear cache after backward pass is complete and values are saved
             del batch_values, combined_rewards, log_probs, batch_policy_loss, scaled_loss
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            self.clear_gpu_cache()
+        
+        # Safe to clear before KL computation
+        self.clear_gpu_cache()
         
         # Add KL penalty if configured (compute once for all batches to save computation)
         try:
@@ -290,11 +306,12 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         # Update the guidance model after processing all batches
         self.accelerator.clip_grad_norm_(self.guidance_model.parameters(), self.max_grad_norm)
         self.guidance_optimizer.step()
+        self.guidance_optimizer.zero_grad()
         
         # Calculate average policy loss
         avg_policy_loss = total_policy_loss / total_samples
 
-        # Return metrics
+        # Prepare metrics before final cache clear
         info = {
             'guidance_loss': avg_policy_loss,
             'guidance_kl_loss': kl_loss.item() if hasattr(kl_loss, 'item') else 0.0,
@@ -304,6 +321,9 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         
         # Add value function metrics
         info.update(value_info)
+        
+        # Safe to clear at the end after all computations
+        self.clear_gpu_cache()
         
         return info
 
