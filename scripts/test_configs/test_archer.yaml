@@ -1,0 +1,24 @@
+defaults:
+  - ../config/archer_math
+  - _self_
+
+# Override paths for testing
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.test_models/archer'
+
+# Minimal model settings for testing
+max_new_tokens: 10
+max_tokens: 10
+
+# Minimal training settings for testing
+rollout_size: 2
+eval_size: 2
+batch_size: 2
+iterations: 2
+epochs: 1
+actor_epochs: 1
+warmup_iter: 1
+grad_accum_steps: 1
+
+# Disable wandb for testing
+use_wandb: false
+run_name: 'test-archer' 
