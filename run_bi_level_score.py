@@ -1,6 +1,7 @@
 """
 BiLevel-guided SCoRe training script.
 This script runs the BiLevel SCoRe training process using the config from hydra.
+Supports both math and code environments.
 """
 
 import os
@@ -11,7 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 from accelerate import Accelerator
 import wandb  # Import wandb
 
-from archer.environment import LLMBatchedMathEnv
+from archer.environment import LLMBatchedMathEnv, LLMBatchedCodeEnv
 from archer.algorithms.offpolicy_train_loop import offpolicy_train_loop
 from archer.models import ArcherAgent
 
@@ -63,33 +64,75 @@ def main(cfg: DictConfig):
     # Prepare the agent
     agent.prepare()
     
-    # Create env
-    env = LLMBatchedMathEnv(
-        env_load_path=cfg.env_load_path,
-        cache_dir=cfg.cache_dir,
-        device=device,
-        max_tokens=cfg.max_tokens,
-        bsize=cfg.rollout_size,
-        data_path="dataset/MATH.csv",
-        correction_model_path=cfg.correction_model_path,
-        use_smart_corrections=cfg.use_smart_corrections,
-        train_guidance_model=cfg.train_guidance_model,
-    )
+    # Determine environment type (math or code)
+    env_type = cfg.env_type if hasattr(cfg, 'env_type') else "math"
+    data_path = cfg.data_path if hasattr(cfg, 'data_path') else "dataset/MATH.csv"
     
-    # Create eval env (smaller batch size for evaluation)
-    eval_env = LLMBatchedMathEnv(
-        env_load_path=cfg.env_load_path,
-        cache_dir=cfg.cache_dir,
-        device=device,
-        max_tokens=cfg.max_tokens,
-        bsize=cfg.eval_size,
-        data_path="dataset/MATH.csv",
-        correction_model_path=cfg.correction_model_path,
-        use_smart_corrections=cfg.use_smart_corrections,
-        train_guidance_model=cfg.train_guidance_model,
-    )
+    # Create appropriate environment based on type
+    if env_type == "code":
+        logger.info(f"Using CodeEnv with data from {data_path}")
+        language = cfg.language if hasattr(cfg, 'language') else "python"
+        
+        # Create env
+        env = LLMBatchedCodeEnv(
+            env_load_path=cfg.env_load_path,
+            cache_dir=cfg.cache_dir,
+            device=device,
+            max_tokens=cfg.max_tokens,
+            bsize=cfg.rollout_size,
+            data_path=data_path,
+            language=language,
+            correction_model_path=cfg.correction_model_path,
+            use_smart_corrections=cfg.use_smart_corrections,
+            train_guidance_model=cfg.train_guidance_model,
+            model_name=cfg.policy_lm,
+        )
+        
+        # Create eval env (smaller batch size for evaluation)
+        eval_env = LLMBatchedCodeEnv(
+            env_load_path=cfg.env_load_path,
+            cache_dir=cfg.cache_dir,
+            device=device,
+            max_tokens=cfg.max_tokens,
+            bsize=cfg.eval_size,
+            data_path=data_path,
+            language=language,
+            correction_model_path=cfg.correction_model_path,
+            use_smart_corrections=cfg.use_smart_corrections,
+            train_guidance_model=cfg.train_guidance_model,
+            model_name=cfg.policy_lm,
+        )
+    else:
+        logger.info(f"Using MathEnv with data from {data_path}")
+        # Create math env
+        env = LLMBatchedMathEnv(
+            env_load_path=cfg.env_load_path,
+            cache_dir=cfg.cache_dir,
+            device=device,
+            max_tokens=cfg.max_tokens,
+            bsize=cfg.rollout_size,
+            data_path=data_path,
+            correction_model_path=cfg.correction_model_path,
+            use_smart_corrections=cfg.use_smart_corrections,
+            train_guidance_model=cfg.train_guidance_model,
+            model_name=cfg.policy_lm,
+        )
+        
+        # Create eval env (smaller batch size for evaluation)
+        eval_env = LLMBatchedMathEnv(
+            env_load_path=cfg.env_load_path,
+            cache_dir=cfg.cache_dir,
+            device=device,
+            max_tokens=cfg.max_tokens,
+            bsize=cfg.eval_size,
+            data_path=data_path,
+            correction_model_path=cfg.correction_model_path,
+            use_smart_corrections=cfg.use_smart_corrections,
+            train_guidance_model=cfg.train_guidance_model,
+            model_name=cfg.policy_lm,
+        )
     
-    logger.info("Starting BiLevel SCoRe training...")
+    logger.info(f"Starting BiLevel SCoRe training for {env_type} problems...")
     
     separator = "=" * 80
     mode = "FULL GRADIENT FLOW" if not cfg.stop_value_gradients else "STOP GRADIENT"
