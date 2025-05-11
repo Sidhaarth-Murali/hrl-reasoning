@@ -1,0 +1,52 @@
+defaults:
+  - default
+  - _self_
+
+# system paths
+cache_dir: '/home/pramit/hrl-nips-work/hrl-reasoning/.cache'  
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models'
+
+# checkpoint
+checkpoint_path: null  
+
+# env
+env_name: math
+env_load_path: null  
+
+# model settings
+agent_type: "archer"
+policy_lm: "meta-llama/Llama-3.2-1B-Instruct"
+critic_lm: "roberta-base"
+max_new_tokens: 512  
+max_tokens: 512  
+temperature: 0.7
+do_sample: true
+use_lora: false
+huggingface_token: "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"
+
+# training hyperparameters
+capacity: 100000      
+rollout_size: 256     
+eval_size: 2     
+batch_size: 2      
+iterations: 10    
+epochs: 5          
+actor_epochs: 4     
+warmup_iter: 1      
+grad_accum_steps: 32
+critic_lr: 2e-5
+lm_lr: 1e-6
+
+# algorithm parameters
+gamma: 0.95        
+tau: 0.1           
+max_grad_norm: 1.0  
+
+# evaluation settings
+save_freq: 1    
+eval_freq: 1       
+
+# wandb logging
+use_wandb: false
+project_name: 'llm_rl_math'
+run_name: 'archer-math'

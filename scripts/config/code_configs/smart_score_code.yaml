@@ -1,0 +1,13 @@
+defaults:
+  - score_code
+  - _self_
+
+# SMART_SCoRe specific settings
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/smart_score_code'
+checkpoint_path: null
+use_smart_corrections: true
+correction_model_path: null   
+
+# use a meaningful run name for tracking
+run_name: 'smart-score-code'
+project_name: 'score_code' 

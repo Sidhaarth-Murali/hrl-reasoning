@@ -1,0 +1,15 @@
+defaults:
+  - smart_score_math
+  - _self_
+
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/hrl_score_guide'
+# Add RL training for guidance model
+
+train_guidance_model: true  # Enable training for the guidance model
+guidance_lr: 1e-6           # Learning rate for the guidance model
+guidance_model_path: null    # Path to initialize guidance model (if different from correction_model_path)
+guidance_kl_coef: 0.05       # KL coefficient for guidance model training
+
+# use a meaningful run name for tracking
+run_name: 'rl-guided-score-math'
+project_name: 'score_math' 

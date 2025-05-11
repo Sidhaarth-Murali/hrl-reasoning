@@ -1,0 +1,26 @@
+defaults:
+  - score_math
+  - _self_
+
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/bi_level_score'
+agent_type: "bi_level_score"
+alpha: 10.0       
+beta1: 0.01        
+beta2: 0.1        
+
+train_guidance_model: true       
+guidance_lr: 1e-6                 
+guidance_kl_coef: 0.05            
+guidance_model_path: null         
+
+use_smart_corrections: true
+correction_model_path: null      
+
+use_gradient_checkpointing: true   
+
+value_model_name: "distilroberta-base"  
+value_lr: 1e-5                     
+value_coef: 0.1                   
+stop_value_gradients: false        
+
+run_name: 'bi-level-score-math-variation1'

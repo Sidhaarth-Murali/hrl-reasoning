@@ -1,0 +1,37 @@
+defaults:
+  - score_math
+  - _self_
+
+# Override save path for this specific approach
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/stop_0.01'
+
+# Make sure agent type is bi_level_score
+agent_type: "bi_level_score"
+
+# SCoRe parameters - explicitly added
+alpha: 10.0         # Reward shaping coefficient
+beta1: 0.01         # KL coefficient for Stage II
+beta2: 0.1          # KL coefficient for Stage I
+
+
+# RL-Guided SCoRe parameters - needed for bilevel implementation
+train_guidance_model: true         # Enable training for the guidance model
+guidance_lr: 1e-6                  # Learning rate for the guidance model
+guidance_kl_coef: 0.5             # KL coefficient for guidance model training
+guidance_model_path: null          # Path to initialize guidance model
+
+# SMART_SCoRe additions
+use_smart_corrections: true
+correction_model_path: null        # Added this missing parameter
+
+# Memory optimization settings
+use_gradient_checkpointing: true   # Enable gradient checkpointing to save memory
+
+# Bilevel optimization specific parameters
+value_model_name: "distilroberta-base"  # Smaller model for memory efficiency
+value_lr: 1e-5                     # Learning rate for the value function
+value_coef: 0.01                    # Coefficient for the value function in the combined reward
+stop_value_gradients: true        # Whether to stop gradients from value function to guidance model
+
+# Use a meaningful run name for tracking while keeping everything else consistent
+run_name: 'bi-level-stopgrad-c0.01'

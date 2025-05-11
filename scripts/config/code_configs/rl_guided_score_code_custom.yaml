@@ -1,0 +1,21 @@
+defaults:
+  - smart_score_code
+  - _self_
+
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/hrl_score_guide_code'
+
+# Add RL training for guidance model
+train_guidance_model: true     # Enable training for the guidance model
+guidance_lr: 1e-6              # Learning rate for the guidance model
+guidance_model_path: null      # Path to initialize guidance model
+guidance_kl_coef: 0.05         # KL coefficient for guidance model training
+
+# Make sure the rollout and iterations match requirements
+rollout_size: 128              # As specified
+iterations: 69                 # As specified
+stage1_steps: 34               # As specified
+stage2_steps: 35               # As specified
+
+# use a meaningful run name for tracking
+run_name: 'rl-guided-score-code'
+project_name: 'score_code' 

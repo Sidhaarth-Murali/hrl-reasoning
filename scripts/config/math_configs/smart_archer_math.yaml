@@ -1,0 +1,59 @@
+defaults:
+  - default
+  - _self_
+
+# system paths
+cache_dir: '/home/pramit/hrl-nips-work/hrl-reasoning/.cache'  
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/smart_archer'
+
+# checkpoint
+checkpoint_path: null  
+
+# env
+env_name: math
+env_load_path: null  
+
+# model settings
+agent_type: "smart_archer"
+policy_lm: "meta-llama/Llama-3.2-1B-Instruct"
+critic_lm: "roberta-base"
+max_new_tokens: 512  
+max_tokens: 512  
+temperature: 0.7
+do_sample: true
+use_lora: true
+huggingface_token: "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"
+
+# SMART specific settings
+use_smart_corrections: true                     # Use dynamic correction instructions
+correction_model_path: null                     # Use same model for corrections
+use_hierarchical: true                          # Use hierarchical two-turn approach
+alpha: 10.0                                     # Coefficient for reward shaping
+eos_str: "\n"                                   # End of sequence marker
+
+# training hyperparameters
+capacity: 100000      
+rollout_size: 128     
+eval_size: 2     
+batch_size: 16      
+iterations: 70    
+epochs: 2         
+actor_epochs: 2     
+warmup_iter: 10      
+grad_accum_steps: 8
+critic_lr: 2e-5
+lm_lr: 1e-6
+
+# algorithm parameters
+gamma: 0.95        
+tau: 0.1           
+max_grad_norm: 1.0  
+
+# evaluation settings
+save_freq: 25    
+eval_freq: 25       
+
+# wandb logging
+use_wandb: false
+project_name: 'llm_rl_math'
+run_name: 'smart-archer-math' 
