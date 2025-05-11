@@ -1,0 +1,55 @@
+# RL-guided SCoRe config for code problems
+
+# Project settings
+project_name: archer_code_rl
+run_name: rl_guided_score_code
+use_wandb: true
+cache_dir: cache/
+
+# Environment settings
+env_type: code
+language: python
+data_path: dataset/CodeProblems.csv
+env_load_path: null
+
+# Model settings
+policy_lm: mistralai/Mistral-7B-Instruct-v0.2
+critic_lr: 5e-5
+lm_lr: 5e-5
+use_lora: true
+
+# Training parameters
+temperature: 0.7
+do_sample: true
+max_tokens: 1024
+iterations: 70
+grad_accum_steps: 4
+warmup_iter: 4
+rollout_size: 128
+eval_size: 8
+batch_size: 4
+capacity: 1000
+gamma: 0.99
+tau: 0.005
+actor_epochs: 1
+max_grad_norm: 1.0
+save_path: model_checkpoints/
+save_freq: 20
+eval_freq: 5
+
+# SCoRe parameters
+alpha: 0.1  # SCoRe parameter (reward weight)
+beta1: 0.1  # SCoRe parameter (KL weight in stage 1)
+beta2: 0.1  # SCoRe parameter (KL weight in stage 2)
+stage1_steps: 1  # Number of stage 1 optimization steps
+stage2_steps: 1  # Number of stage 2 optimization steps
+
+# SMART SCoRe parameters
+use_smart_corrections: false
+correction_model_path: null
+
+# RL-Guided SCoRe parameters 
+train_guidance_model: true
+guidance_lr: 5e-5
+guidance_model_path: null
+guidance_kl_coef: 0.1 
