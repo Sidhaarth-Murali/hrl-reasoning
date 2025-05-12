@@ -8,7 +8,7 @@ from typing import Tuple, List, Dict
 import random
 import time
 import torch.nn.functional as F
-from archer.prompts import format_math_prompt, format_math_self_correction_prompt
+from archer.prompts import format_math_prompt, format_math_self_correction_prompt, generate_smart_correction_prompt
 
 def dict_mean(dict_list):
     """Calculate the mean of values in a list of dictionaries with the same keys."""
@@ -65,12 +65,42 @@ class SCoReTrainer():
             agent.model.use_memory_efficient_attention = True
             print("Memory efficient attention enabled")
         
-        # Create a frozen reference model for KL divergence calculation
+        # Create a frozen reference model for KL divergence calculation with memory optimizations
         print("Creating frozen reference model for KL divergence...")
         with torch.cuda.device(agent.model.device):
             torch.cuda.empty_cache()  # Clear memory before creating reference model
         
-        self.ref_model = copy.deepcopy(accelerator.unwrap_model(agent.model)).eval().to(agent.model.device)
+        # Create reference model with memory optimizations
+        try:
+            # Try to use 8-bit quantization for reference model
+            from transformers import BitsAndBytesConfig
+            quantization_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+                llm_int8_threshold=6.0,
+                llm_int8_skip_modules=None,
+            )
+            self.ref_model = type(accelerator.unwrap_model(agent.model)).from_pretrained(
+                agent.model.config._name_or_path,
+                device_map="auto",
+                quantization_config=quantization_config,
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+            )
+            print("Created 8-bit quantized reference model")
+        except Exception as e:
+            print(f"Failed to create 8-bit reference model: {e}")
+            print("Falling back to standard model copy with CPU offloading")
+            # Fallback: Create copy on CPU first
+            self.ref_model = copy.deepcopy(accelerator.unwrap_model(agent.model)).cpu()
+            # Move to GPU only when needed
+            if torch.cuda.is_available():
+                try:
+                    self.ref_model = self.ref_model.to(agent.model.device)
+                except Exception as e:
+                    print(f"Failed to move reference model to GPU: {e}")
+                    print("Keeping reference model on CPU")
+        
+        # Freeze reference model parameters
         for p in self.ref_model.parameters():
             p.requires_grad = False
         
@@ -101,7 +131,7 @@ class SCoReTrainer():
         Memory-optimized implementation with improved chunking and cleanup.
         """
         # Process in very small chunks to minimize memory usage
-        max_chunk_size = 4  # Reduced from previous value for more granular processing
+        max_chunk_size = 2  # Reduced from 4 to 2 for more granular processing
         total_samples = len(observation) if isinstance(observation, list) else 1
         kl_div_sum = 0.0
         total_tokens = 0
@@ -112,81 +142,105 @@ class SCoReTrainer():
             action = [action]
             
         for i in range(0, total_samples, max_chunk_size):
+            # Clear cache at the start of each major chunk
+            self.clear_gpu_cache()
+            
             end_idx = min(i + max_chunk_size, total_samples)
             chunk_obs = observation[i:end_idx]
             chunk_act = action[i:end_idx]
             
-            # Tokenize the inputs for this small chunk
-            obs_ids = self.tokenizer(chunk_obs, return_tensors='pt', padding=True, truncation=True, max_length=512)
-            act_ids = self.tokenizer(chunk_act, return_tensors='pt', padding=True, truncation=True, max_length=512)
-            
-            # Move to device
-            obs_ids = {k: v.to(self.agent.model.device) for k, v in obs_ids.items()}
-            act_ids = {k: v.to(self.agent.model.device) for k, v in act_ids.items()}
-            
-            input_ids = torch.cat([obs_ids["input_ids"], act_ids["input_ids"]], dim=1)
-            attention_mask = torch.cat([obs_ids["attention_mask"], act_ids["attention_mask"]], dim=1)
-            
-            # Process tokens in smaller sub-chunks if sequence is long
-            seq_length = input_ids.size(1)
-            max_seq_chunk = 128  # Process sequence in smaller chunks
-            
-            chunk_kl_div = 0.0
-            chunk_tokens = 0
-            
-            for seq_start in range(0, seq_length, max_seq_chunk):
-                seq_end = min(seq_start + max_seq_chunk, seq_length)
+            try:
+                # Tokenize the inputs for this small chunk
+                obs_ids = self.tokenizer(chunk_obs, return_tensors='pt', padding=True, truncation=True, max_length=512)
+                act_ids = self.tokenizer(chunk_act, return_tensors='pt', padding=True, truncation=True, max_length=512)
                 
-                # Get sequence chunk
-                chunk_input_ids = input_ids[:, seq_start:seq_end]
-                chunk_attention_mask = attention_mask[:, seq_start:seq_end]
+                # Move to device
+                obs_ids = {k: v.to(self.agent.model.device) for k, v in obs_ids.items()}
+                act_ids = {k: v.to(self.agent.model.device) for k, v in act_ids.items()}
                 
-                # Get logits from current model WITH gradients enabled
-                outputs_current = self.agent.model(
-                    input_ids=chunk_input_ids,
-                    attention_mask=chunk_attention_mask
-                ).logits
+                input_ids = torch.cat([obs_ids["input_ids"], act_ids["input_ids"]], dim=1)
+                attention_mask = torch.cat([obs_ids["attention_mask"], act_ids["attention_mask"]], dim=1)
                 
-                # Get logits from reference model WITHOUT gradients
-                with torch.no_grad():
-                    outputs_ref = reference_model(
+                # Process tokens in smaller sub-chunks if sequence is long
+                seq_length = input_ids.size(1)
+                max_seq_chunk = 64  # Reduced from 128 to 64
+                
+                chunk_kl_div = 0.0
+                chunk_tokens = 0
+                
+                for seq_start in range(0, seq_length, max_seq_chunk):
+                    # Clear cache at the start of each sequence chunk
+                    self.clear_gpu_cache()
+                    
+                    seq_end = min(seq_start + max_seq_chunk, seq_length)
+                    
+                    # Get sequence chunk
+                    chunk_input_ids = input_ids[:, seq_start:seq_end]
+                    chunk_attention_mask = attention_mask[:, seq_start:seq_end]
+                    
+                    # Get logits from current model WITH gradients enabled
+                    outputs_current = self.agent.model(
                         input_ids=chunk_input_ids,
                         attention_mask=chunk_attention_mask
                     ).logits
+                    
+                    # Get logits from reference model WITHOUT gradients
+                    with torch.no_grad():
+                        outputs_ref = reference_model(
+                            input_ids=chunk_input_ids,
+                            attention_mask=chunk_attention_mask
+                        ).logits
+                    
+                    # Calculate KL divergence for this sub-chunk
+                    log_probs_current = F.log_softmax(outputs_current, dim=-1)
+                    probs_ref = F.softmax(outputs_ref, dim=-1)
+                    
+                    # Compute KL divergence with memory-efficient operations
+                    sub_chunk_kl = F.kl_div(
+                        input=log_probs_current.float(),  # Ensure float32
+                        target=probs_ref.float(),        # Ensure float32
+                        reduction='none',                # No reduction to save memory
+                        log_target=False
+                    )
+                    
+                    # Sum over vocabulary dimension first
+                    sub_chunk_kl = sub_chunk_kl.sum(dim=-1)  # Sum over vocab
+                    
+                    # Apply attention mask and get mean
+                    valid_tokens = chunk_attention_mask.sum().item()
+                    sub_chunk_kl = (sub_chunk_kl * chunk_attention_mask).sum() / valid_tokens
+                    
+                    chunk_kl_div += sub_chunk_kl.item()
+                    chunk_tokens += valid_tokens
+                    
+                    # Clean up GPU memory
+                    del outputs_current, outputs_ref, log_probs_current, probs_ref, sub_chunk_kl
+                    self.clear_gpu_cache()
                 
-                # Calculate KL divergence for this sub-chunk
-                log_probs_current = F.log_softmax(outputs_current, dim=-1)
-                probs_ref = F.softmax(outputs_ref, dim=-1)
+                # Accumulate KL divergence weighted by number of tokens
+                kl_div_sum += chunk_kl_div * chunk_tokens
+                total_tokens += chunk_tokens
                 
-                # Compute KL divergence with memory-efficient operations
-                sub_chunk_kl = F.kl_div(
-                    input=log_probs_current.float(),  # Ensure float32
-                    target=probs_ref.float(),        # Ensure float32
-                    reduction='none',                # No reduction to save memory
-                    log_target=False
-                )
+                # Clean up chunk tensors
+                del obs_ids, act_ids, input_ids, attention_mask
+                self.clear_gpu_cache()
                 
-                # Sum over vocabulary dimension first
-                sub_chunk_kl = sub_chunk_kl.sum(dim=-1)  # Sum over vocab
-                
-                # Apply attention mask and get mean
-                valid_tokens = chunk_attention_mask.sum().item()
-                sub_chunk_kl = (sub_chunk_kl * chunk_attention_mask).sum() / valid_tokens
-                
-                chunk_kl_div += sub_chunk_kl.item()
-                chunk_tokens += valid_tokens
-                
-                # Clean up GPU memory
-                del outputs_current, outputs_ref, log_probs_current, probs_ref, sub_chunk_kl
-                torch.cuda.empty_cache()
-            
-            # Accumulate KL divergence weighted by number of tokens
-            kl_div_sum += chunk_kl_div * chunk_tokens
-            total_tokens += chunk_tokens
-            
-            # Clean up chunk tensors
-            del obs_ids, act_ids, input_ids, attention_mask
-            torch.cuda.empty_cache()
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    # Emergency cleanup
+                    self.clear_gpu_cache()
+                    print(f"OOM in KL calculation for chunk {i}-{end_idx}, trying with smaller chunks")
+                    # Try processing one sample at a time
+                    for single_idx in range(i, end_idx):
+                        single_result = self.calculate_kl_divergence(
+                            [observation[single_idx]], 
+                            [action[single_idx]], 
+                            reference_model
+                        )
+                        kl_div_sum += single_result.item()
+                        total_tokens += 1
+                else:
+                    raise e
         
         # Return average KL divergence across all tokens
         return torch.tensor(kl_div_sum / total_tokens, device=self.agent.model.device)
@@ -198,42 +252,111 @@ class SCoReTrainer():
         
         Uses pure REINFORCE (policy gradients) with no critic networks.
         """
+        try:
+            # Clear cache before starting
+            self.clear_gpu_cache()
 
-        # Calculate KL divergence for first turn using the frozen reference model
-        kl_div = self.calculate_kl_divergence(observation, action_turn1, self.ref_model)
-        
-        # Calculate log probabilities for second turn using REINFORCE
-        prompts = [format_math_self_correction_prompt(o + a1) for o, a1 in zip(observation, action_turn1)]
-        log_prob_turn2 = self.agent.get_log_prob(prompts, action_turn2)
-        
-        # Convert rewards to tensors (avoiding the UserWarning by properly using .clone().detach())
-        reward_turn2_tensor = torch.as_tensor(reward_turn2, device=self.agent.model.device, dtype=torch.float).detach()
-        
-        # Ensure log_prob has proper shape
-        if log_prob_turn2.dim() > 1:
-            log_prob_turn2 = log_prob_turn2.flatten()
+            # Calculate KL divergence for first turn using the frozen reference model
+            kl_div = self.calculate_kl_divergence(observation, action_turn1, self.ref_model)
             
-        # Calculate Stage I loss: -r2 + beta2 * KL
-        policy_loss = -torch.mean(log_prob_turn2 * reward_turn2_tensor)
-        reg_loss = self.beta2 * kl_div
-        loss = policy_loss + reg_loss
-        
-        # Save metric values before cleaning up tensors
-        policy_loss_value = policy_loss.detach().cpu().item()
-        reg_loss_value = reg_loss.detach().cpu().item()
-        loss_value = loss.detach().cpu().item()
-        kl_div_value = kl_div.detach().cpu().item()
-        reward_turn2_mean = sum(reward_turn2) / len(reward_turn2)        
-        # Backward pass with memory cleanup
-        self.accelerator.backward(loss)
+            # Clear cache after KL calculation
+            self.clear_gpu_cache()
             
-        return {
-            "stage1_loss": loss_value,
-            "stage1_policy_loss": policy_loss_value,
-            "stage1_kl_loss": reg_loss_value,
-            "stage1_reward_turn2_mean": reward_turn2_mean,
-            "stage1_kl_div": kl_div_value
-        }
+            # Calculate log probabilities for second turn using REINFORCE
+            prompts = [format_math_self_correction_prompt(o + a1) for o, a1 in zip(observation, action_turn1)]
+            
+            # Process in smaller chunks if needed
+            max_prompt_chunk = 4  # Process at most 4 prompts at once
+            log_probs = []
+            
+            for i in range(0, len(prompts), max_prompt_chunk):
+                # Clear cache before each chunk
+                self.clear_gpu_cache()
+                
+                chunk_end = min(i + max_prompt_chunk, len(prompts))
+                chunk_prompts = prompts[i:chunk_end]
+                chunk_actions = action_turn2[i:chunk_end]
+                
+                chunk_log_prob = self.agent.get_log_prob(chunk_prompts, chunk_actions)
+                log_probs.append(chunk_log_prob)
+                
+                # Clear cache after each chunk
+                self.clear_gpu_cache()
+            
+            # Combine log probabilities
+            log_prob_turn2 = torch.cat(log_probs)
+            
+            # Convert rewards to tensors
+            reward_turn2_tensor = torch.as_tensor(reward_turn2, device=self.agent.model.device, dtype=torch.float).detach()
+            
+            # Ensure log_prob has proper shape
+            if log_prob_turn2.dim() > 1:
+                log_prob_turn2 = log_prob_turn2.flatten()
+                
+            # Calculate Stage I loss: -r2 + beta2 * KL
+            policy_loss = -torch.mean(log_prob_turn2 * reward_turn2_tensor)
+            reg_loss = self.beta2 * kl_div
+            loss = policy_loss + reg_loss
+            
+            # Save metric values before cleaning up tensors
+            policy_loss_value = policy_loss.detach().cpu().item()
+            reg_loss_value = reg_loss.detach().cpu().item()
+            loss_value = loss.detach().cpu().item()
+            kl_div_value = kl_div.detach().cpu().item()
+            reward_turn2_mean = sum(reward_turn2) / len(reward_turn2)
+            
+            # Clear intermediate tensors
+            del log_prob_turn2, reward_turn2_tensor, policy_loss, reg_loss, kl_div
+            self.clear_gpu_cache()
+            
+            # Backward pass with memory cleanup
+            self.accelerator.backward(loss)
+            
+            # Final cache clear
+            self.clear_gpu_cache()
+                
+            return {
+                "stage1_loss": loss_value,
+                "stage1_policy_loss": policy_loss_value,
+                "stage1_kl_loss": reg_loss_value,
+                "stage1_reward_turn2_mean": reward_turn2_mean,
+                "stage1_kl_div": kl_div_value
+            }
+            
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                # Emergency cleanup
+                self.clear_gpu_cache()
+                print("OOM in stage1_loss, trying with smaller batch")
+                # Process one sample at a time
+                total_loss = 0
+                total_policy_loss = 0
+                total_reg_loss = 0
+                total_kl_div = 0
+                
+                for i in range(len(observation)):
+                    single_result = self.stage1_loss(
+                        [observation[i]], 
+                        [action_turn1[i]], 
+                        [action_turn2[i]], 
+                        [reward_turn1[i]], 
+                        [reward_turn2[i]]
+                    )
+                    total_loss += single_result["stage1_loss"]
+                    total_policy_loss += single_result["stage1_policy_loss"]
+                    total_reg_loss += single_result["stage1_kl_loss"]
+                    total_kl_div += single_result["stage1_kl_div"]
+                
+                n = len(observation)
+                return {
+                    "stage1_loss": total_loss / n,
+                    "stage1_policy_loss": total_policy_loss / n,
+                    "stage1_kl_loss": total_reg_loss / n,
+                    "stage1_reward_turn2_mean": sum(reward_turn2) / n,
+                    "stage1_kl_div": total_kl_div / n
+                }
+            else:
+                raise e
     
     def stage2_loss(self, observation, action_turn1, action_turn2, reward_turn1, reward_turn2, **kwargs):
         """

@@ -36,18 +36,18 @@ gradient_accumulation_steps: 16
 
 # training hyperparameters
 capacity: 100000      # Replay buffer size
-rollout_size: 128     # Number of parallel environments as specified
+rollout_size: 32     # Number of parallel environments as specified
 eval_size: 8          # Number of trajectories for evaluation
 batch_size: 4         # Training batch size
-iterations: 69        # Total number of iterations as specified
+iterations: 280        # Total number of iterations as specified
 epochs: 10            # Times to train critic on each batch
 actor_epochs: 3       # Times to train actor on each batch
 warmup_iter: 6        # Initial iterations without policy updates
 grad_accum_steps: 8
 critic_lr: 2e-5
 lm_lr: 5e-6
-stage1_steps: 34      # First stage steps as specified
-stage2_steps: 35      # Second stage steps as specified
+stage1_steps: 138      # First stage steps as specified
+stage2_steps: 142      # Second stage steps as specified
 
 # SCoRe parameters
 alpha: 10.0          # Reward shaping coefficient

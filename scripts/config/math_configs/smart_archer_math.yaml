@@ -23,6 +23,9 @@ temperature: 0.7
 do_sample: true
 use_lora: true
 huggingface_token: "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"
+use_gradient_checkpointing: true   # Enable gradient checkpointing
+use_memory_efficient_attention: true   # Enable memory efficient attention
+load_in_8bit: true   # Load model in 8-bit precision
 
 # SMART specific settings
 use_smart_corrections: true                     # Use dynamic correction instructions
@@ -33,9 +36,9 @@ eos_str: "\n"                                   # End of sequence marker
 
 # training hyperparameters
 capacity: 100000      
-rollout_size: 128     
+rollout_size: 32       # Reduced from 128
 eval_size: 2     
-batch_size: 16      
+batch_size: 4         # Reduced from 16
 iterations: 70    
 epochs: 2         
 actor_epochs: 2     

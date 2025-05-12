@@ -11,13 +11,13 @@ agent_type: "bi_level_score"
 # Ensure code environment settings
 env_type: "code"
 language: "python"
-data_path: "dataset/CodeProblems.csv"
+data_path: "dataset/mbpp_filtered.csv"
 
 # Make sure parameters match requirements
-rollout_size: 128    # As specified
-iterations: 69       # As specified  
-stage1_steps: 34     # As specified
-stage2_steps: 35     # As specified
+rollout_size: 32              # As specified
+iterations:   280              # As specified
+stage1_steps: 138               # As specified
+stage2_steps: 142  
 
 # SCoRe parameters - explicitly added
 alpha: 10.0          # Reward shaping coefficient

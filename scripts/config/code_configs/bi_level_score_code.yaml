@@ -9,7 +9,7 @@ cache_dir: cache/
 # Environment settings
 env_type: code
 language: python
-data_path: dataset/CodeProblems.csv
+data_path: dataset/mbpp_filtered.csv
 env_load_path: null
 
 # Model settings

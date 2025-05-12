@@ -11,10 +11,10 @@ guidance_model_path: null      # Path to initialize guidance model
 guidance_kl_coef: 0.05         # KL coefficient for guidance model training
 
 # Make sure the rollout and iterations match requirements
-rollout_size: 128              # As specified
-iterations: 69                 # As specified
-stage1_steps: 34               # As specified
-stage2_steps: 35               # As specified
+rollout_size: 32              # As specified
+iterations:   280              # As specified
+stage1_steps: 138               # As specified
+stage2_steps: 142               # As specified
 
 # use a meaningful run name for tracking
 run_name: 'rl-guided-score-code'
