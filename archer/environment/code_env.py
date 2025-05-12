@@ -171,16 +171,17 @@ class CodeEnv():
             test_results = self.evaluate_code(code, self.curr_test_cases)
             
             # Calculate reward based on test case results
-            # For Stage I/II training: Rewards should be between [0, 1]
+            # Modified: Rewards should be between [-1, 1] instead of [0, 1]
             if test_results["total"] == 0:
                 # If no test cases, fall back to exact match
                 normalized_code = self._normalize_code(code)
                 normalized_solution = self._normalize_code(self.curr_solution)
                 exact_match = normalized_code == normalized_solution
-                reward = 1.0 if exact_match else 0.0
+                reward = 1.0 if exact_match else -1.0
             else:
-                # Scale from 0.0 (all failed) to 1.0 (all passed)
-                reward = test_results["correct"] / test_results["total"]
+                # Scale from -1.0 (all failed) to 1.0 (all passed)
+                correct_ratio = test_results["correct"] / test_results["total"]
+                reward = 2.0 * correct_ratio - 1.0  # Transforms [0,1] to [-1,1]
                 
             # Store results for potential feedback
             self.last_evaluation_results = {
@@ -194,13 +195,12 @@ class CodeEnv():
             all_tests_passed = test_results["correct"] == test_results["total"]
             return all_tests_passed, reward
         except Exception as e:
-            print(f"Error evaluating code: {e}")
             self.last_evaluation_results = {
                 "code": generated_code,
                 "error": str(e),
-                "reward": 0.0
+                "reward": -1.0  # Modified: use -1.0 instead of 0.0 for errors
             }
-            return False, 0.0
+            return False, -1.0
     
     def evaluate_code(self, code_str, test_cases):
         """Run test cases against the code and return results."""
@@ -215,6 +215,12 @@ class CodeEnv():
         
         # Create a clean local scope for execution
         local_scope = {}
+        
+        # Redirect stdout to capture prints
+        import io
+        import sys
+        original_stdout = sys.stdout
+        sys.stdout = io.StringIO()
         
         try:
             # First execute the code to define the functions
@@ -248,6 +254,9 @@ class CodeEnv():
             results["details"].append({
                 "error": f"Code execution failed: {str(e)}"
             })
+        finally:
+            # Restore stdout
+            sys.stdout = original_stdout
         
         return results
     
@@ -267,20 +276,10 @@ class CodeEnv():
         results = self.last_evaluation_results
         
         if "error" in results:
-            return f"Error: {results['error']}"
+            return f"Error occurred"
         
         test_results = results["test_results"]
-        feedback = f"Passed {test_results['correct']}/{test_results['total']} test cases.\n"
-        feedback += f"Reward: {results['reward']:.4f}\n\n"
-        
-        # Add details for each test case
-        if "details" in test_results:
-            for i, detail in enumerate(test_results["details"]):
-                if "test_case" in detail:
-                    result = "✅" if detail.get("passed", False) else "❌"
-                    feedback += f"{result} Test {i+1}: {detail['test_case']}\n"
-                    if not detail.get("passed", False) and "error" in detail:
-                        feedback += f"   Error: {detail['error']}\n"
+        feedback = f"Passed {test_results['correct']}/{test_results['total']} test cases."
         
         return feedback
     
@@ -341,7 +340,7 @@ class LLMBatchedCodeEnv():
         cache_dir: str = '~/.cache',
         device = None,
         max_tokens: int=1024,
-        bsize: int=2,  
+        bsize: int=128,  
         data_path: str=DEFAULT_DATASET_PATH,
         language: str="python",
         correction_model_path: str = None,  

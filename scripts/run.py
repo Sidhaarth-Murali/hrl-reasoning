@@ -139,15 +139,27 @@ def main(config: "DictConfig"):
             cache_dir=config.cache_dir,
             max_new_tokens=config.max_new_tokens,
             use_lora=config.use_lora,
+            use_gradient_checkpointing=config.use_gradient_checkpointing if hasattr(config, 'use_gradient_checkpointing') else False,
+            use_memory_efficient_attention=config.use_memory_efficient_attention if hasattr(config, 'use_memory_efficient_attention') else False,
+            load_in_8bit=config.load_in_8bit if hasattr(config, 'load_in_8bit') else False,
             eos_str='\n'
         )
     elif config.agent_type.lower() == "online_filteredbc":
         print(">>> Using Online FilteredBC agent")
         # the agent is the same as ArCHer, only the trainer will be different
-        agent = ArcherAgent(device=device, accelerator=accelerator, 
-                            temperature=config.temperature, do_sample=config.do_sample, 
-                            policy_lm=config.policy_lm, critic_lm=config.critic_lm,
-                            cache_dir=config.cache_dir, max_new_tokens=config.max_new_tokens)
+        agent = ArcherAgent(
+            device=device, 
+            accelerator=accelerator,
+            temperature=config.temperature, 
+            do_sample=config.do_sample, 
+            policy_lm=config.policy_lm, 
+            critic_lm=config.critic_lm,
+            cache_dir=config.cache_dir, 
+            max_new_tokens=config.max_new_tokens,
+            use_gradient_checkpointing=config.use_gradient_checkpointing if hasattr(config, 'use_gradient_checkpointing') else False,
+            use_memory_efficient_attention=config.use_memory_efficient_attention if hasattr(config, 'use_memory_efficient_attention') else False,
+            load_in_8bit=config.load_in_8bit if hasattr(config, 'load_in_8bit') else False
+        )
     elif config.agent_type.lower() == "score":
         print(">>> Using SCoRe agent")
         # Check if we're using a specific variant of SCoRe
@@ -168,6 +180,9 @@ def main(config: "DictConfig"):
             cache_dir=config.cache_dir,
             max_new_tokens=config.max_new_tokens,
             use_lora=config.use_lora,
+            use_gradient_checkpointing=config.use_gradient_checkpointing if hasattr(config, 'use_gradient_checkpointing') else False,
+            use_memory_efficient_attention=config.use_memory_efficient_attention if hasattr(config, 'use_memory_efficient_attention') else False,
+            load_in_8bit=config.load_in_8bit if hasattr(config, 'load_in_8bit') else False,
             eos_str='\n'
         )
     elif config.agent_type.lower() == "bi_level_score":
@@ -183,6 +198,9 @@ def main(config: "DictConfig"):
             cache_dir=config.cache_dir,
             max_new_tokens=config.max_new_tokens,
             use_lora=config.use_lora,
+            use_gradient_checkpointing=config.use_gradient_checkpointing if hasattr(config, 'use_gradient_checkpointing') else False,
+            use_memory_efficient_attention=config.use_memory_efficient_attention if hasattr(config, 'use_memory_efficient_attention') else False,
+            load_in_8bit=config.load_in_8bit if hasattr(config, 'load_in_8bit') else False,
             eos_str='\n'
         )
     else:

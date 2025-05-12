@@ -11,10 +11,36 @@ from archer.models.critic import DoubleCritic
 class ArcherAgent(torch.nn.Module):
     def __init__(self, device, accelerator, policy_lm = "llama3.2", critic_lm = "roberta-base", 
                 cache_dir = '~/.cache', dropout = 0.5, TEMPLATE = None, use_lora=False,
-                do_sample = True, temperature = 0.9, max_new_tokens = 512, use_bfloat16 = False, eos_str = '\n'):
+                do_sample = True, temperature = 0.9, max_new_tokens = 512, use_bfloat16 = False, eos_str = '\n', use_gradient_checkpointing = False, use_memory_efficient_attention = False,
+                load_in_8bit = False):
         super(ArcherAgent, self).__init__()
         if True:
-            self.model = AutoModelForCausalLM.from_pretrained(policy_lm, cache_dir=cache_dir).to(device)
+            # Use 8-bit quantization if requested to save memory
+            if load_in_8bit:
+                print("Loading model in 8-bit precision to save memory")
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    policy_lm, 
+                    cache_dir=cache_dir,
+                    load_in_8bit=True,
+                    device_map="auto"
+                )
+            else:
+                self.model = AutoModelForCausalLM.from_pretrained(policy_lm, cache_dir=cache_dir).to(device)
+            
+        # Enable gradient checkpointing to save memory if requested
+        if use_gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled for model")
+            
+        # Enable memory efficient attention if requested
+        if use_memory_efficient_attention and hasattr(self.model, "config"):
+            if hasattr(self.model.config, "use_memory_efficient_attention"):
+                self.model.config.use_memory_efficient_attention = True
+                print("Memory efficient attention enabled for model")
+            elif hasattr(self.model.config, "attention_implementation"):
+                self.model.config.attention_implementation = "flash_attention_2"
+                print("Flash Attention 2 enabled for model")
+            
         if use_lora:
             from peft import LoraConfig, TaskType, get_peft_model
             lora_config = LoraConfig(
@@ -61,7 +87,6 @@ class ArcherAgent(torch.nn.Module):
 
     def get_action(self, observation):
         # Debug print for observation info
-        print(f"Debug: get_action received observations of type {type(observation)} with length {len(observation)}")
         
         if self.template is not None:
             if isinstance(self.template, list):
