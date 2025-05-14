@@ -4,6 +4,7 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from archer.algorithms.score.rl_guided_trainer import RLGuidedSCoReTrainer
 from archer.models.value_function import ValueFunction
+import numpy as np
 
 class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
     """
@@ -56,6 +57,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             **kwargs
         )
         
+        # Store configuration
         self.value_coef = value_coef
         self.stop_value_gradients = stop_value_gradients
         

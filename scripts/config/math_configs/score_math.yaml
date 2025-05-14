@@ -40,7 +40,7 @@ batch_size: 2         # Training batch size
 iterations: 280        # Total number of iterations
 epochs: 10            # Times to train critic on each batch
 actor_epochs: 3       # Times to train actor on each batch
-warmup_iter: 6        # Initial iterations without policy updates
+warmup_iter: 28        # Initial iterations without policy updates
 grad_accum_steps: 4
 critic_lr: 2e-5
 lm_lr: 5e-6

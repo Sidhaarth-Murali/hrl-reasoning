@@ -4,7 +4,7 @@ defaults:
 
 # system paths
 cache_dir: '/home/pramit/hrl-nips-work/hrl-reasoning/.cache'  
-save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/archer_code'
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/archer_code_1b'
 
 # checkpoint
 checkpoint_path: null  
@@ -28,13 +28,13 @@ huggingface_token: "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"
 
 # training hyperparameters
 capacity: 100000      
-rollout_size: 128     # As specified
+rollout_size: 32     # As specified
 eval_size: 2     
 batch_size: 2      
-iterations: 10    
-epochs: 5          
+iterations: 280    
+epochs: 3          
 actor_epochs: 4     
-warmup_iter: 1      
+warmup_iter: 35      
 grad_accum_steps: 32
 critic_lr: 2e-5
 lm_lr: 1e-6
@@ -45,10 +45,10 @@ tau: 0.1
 max_grad_norm: 1.0  
 
 # evaluation settings
-save_freq: 1    
-eval_freq: 1       
+save_freq: 70    
+eval_freq: 70       
 
 # wandb logging
-use_wandb: false
+use_wandb: true
 project_name: 'llm_rl_code'
 run_name: 'archer-code' 

@@ -6,6 +6,9 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from archer.algorithms.score.trainer import SCoReTrainer
 from archer.prompts import generate_smart_correction_prompt, format_math_self_correction_prompt
+import torch.nn as nn
+import numpy as np
+import copy as _copy
 
 class RLGuidedSCoReTrainer(SCoReTrainer):
     """
@@ -42,62 +45,51 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         self.train_guidance_model = train_guidance_model
         self.guidance_kl_coef = guidance_kl_coef
 
-        # Initialize or clone guidance model with memory optimizations
+        # Initialize or clone guidance model
         if guidance_model is not None:
+            print("Using provided guidance model")
             self.guidance_model = guidance_model
         else:
+            print("Creating guidance model from reference model...")
             try:
-                from peft import PeftModel
-                if isinstance(self.ref_model, PeftModel):
-                    print("Cloning PeftModel with memory optimizations...")
-                    # Move ref_model to CPU before copying to save memory
-                    self.ref_model.to('cpu')
-                    import copy as _copy
-                    self.guidance_model = _copy.deepcopy(self.ref_model)
-                    # Move models back to appropriate devices
-                    self.ref_model.to(agent.model.device)
-                    self.guidance_model.to(agent.model.device)
+                # Simple deep copy approach to avoid PEFT errors
+                # Move ref_model to CPU before copying to save memory
+                ref_device = self.ref_model.device
+                self.ref_model.to('cpu')
+                
+                # Create a direct copy
+                self.guidance_model = _copy.deepcopy(self.ref_model)
+                
+                # Move models back to appropriate devices
+                self.ref_model.to(ref_device)
+                self.guidance_model.to(agent.model.device)
+                
+                # Clear cache
+                if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                else:
-                    print("Initializing new model with memory optimizations...")
-                    model_cls = type(self.ref_model)
-                    cfg_dict = {k: v for k, v in self.ref_model.config.to_dict().items() if not k.startswith('_')}
                     
-                    # Add memory optimization configs
-                    cfg_dict['low_cpu_mem_usage'] = True
-                    if use_memory_efficient_attention:
-                        cfg_dict['use_memory_efficient_attention'] = True
-                        cfg_dict['use_flash_attention'] = True
-                    
-                    # Initialize model on CPU first
-                    self.guidance_model = model_cls(**cfg_dict).to('cpu')
-                    
-                    # Load state dict in chunks to save memory
-                    chunk_size = 100  # Process state dict in chunks
-                    ref_sd = {}
-                    keys = list(self.ref_model.state_dict().keys())
-                    for i in range(0, len(keys), chunk_size):
-                        chunk_keys = keys[i:i + chunk_size]
-                        for k in chunk_keys:
-                            ref_sd[k] = self.ref_model.state_dict()[k].to('cpu')
-                    
-                    self.guidance_model.load_state_dict(ref_sd)
-                    del ref_sd
-                    # Move to target device
-                    self.guidance_model.to(agent.model.device)
-                    torch.cuda.empty_cache()
+                print("Guidance model successfully created")
             except Exception as e:
-                print(f"Error in optimized model initialization: {e}")
-                print("Falling back to basic initialization...")
-                if isinstance(self.ref_model, PeftModel):
-                    self.guidance_model = _copy.deepcopy(self.ref_model).to(agent.model.device)
-                else:
-                    model_cls = type(self.ref_model)
-                    self.guidance_model = model_cls(self.ref_model.config).to(agent.model.device)
-                    self.guidance_model.load_state_dict(self.ref_model.state_dict())
-                torch.cuda.empty_cache()
+                print(f"Error creating guidance model: {e}")
+                print("Creating a simpler guidance model")
+                
+                # Fallback to simpler copy
+                device_orig = self.ref_model.device
+                self.ref_model.to('cpu')
+                self.guidance_model = _copy.deepcopy(self.ref_model)
+                self.ref_model.to(device_orig)
+                self.guidance_model.to('cpu')  # Keep on CPU initially
+                
+                # Move to GPU if we have enough memory
+                if torch.cuda.is_available():
+                    try:
+                        free_mem = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0) 
+                        if free_mem > 2 * 1024 * 1024 * 1024:  # 2GB
+                            self.guidance_model.to(agent.model.device)
+                    except:
+                        pass  # Keep on CPU if error
 
-        # Enable memory optimizations for guidance model
+        # Enable optimizations for guidance model
         if use_gradient_checkpointing and hasattr(self.guidance_model, "gradient_checkpointing_enable"):
             self.guidance_model.gradient_checkpointing_enable()
             print("Gradient checkpointing enabled for guidance model")
@@ -111,21 +103,14 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
                     self.guidance_model.config.use_flash_attention = True
                     print("Flash attention enabled for guidance model")
 
-        # Guidance optimizer and snapshot parameters with memory optimization
+        # Initialize guidance optimizer if training is enabled
         if self.train_guidance_model:
-            # Initialize optimizer with gradient accumulation
+            # Use standard Adam optimizer
             self.guidance_optimizer = torch.optim.Adam(
                 self.guidance_model.parameters(),
                 lr=guidance_lr
             )
             self.guidance_optimizer = self.accelerator.prepare(self.guidance_optimizer)
-            
-            # Store reference parameters on CPU to save GPU memory
-            self.ref_params = {}
-            for name, param in self.guidance_model.named_parameters():
-                if param.requires_grad:
-                    self.ref_params[name] = param.detach().cpu().clone()
-            
             print(f"Guidance model training enabled with lr={guidance_lr}")
         else:
             print("Guidance model training disabled")

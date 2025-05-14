@@ -2,7 +2,9 @@ defaults:
   - score_math
   - _self_
 
-# SMART_SCoRe specific settings
+cache_dir: '/home/pramit/hrl-nips-work/hrl-reasoning/.cache'
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/smart_score'
+
 checkpoint_path: null
 use_smart_corrections: true
 correction_model_path: null   

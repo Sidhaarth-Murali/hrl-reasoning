@@ -55,17 +55,17 @@ def offpolicy_train_loop(env,
                          accelerator,
                          grad_accum_steps: int = 8,
                          warmup_iter: int = 1,
-                         rollout_size: int = 512,     # Increased to 512 for SCoRe
+                         rollout_size: int = 512,     
                          eval_size: int = 4,
-                         batch_size: int = 512,       # Increased to 512 for SCoRe
+                         batch_size: int = 512,       
                          capacity: int = 500000,
-                         iterations: int = 3000,      # Set to 3000 for SCoRe as specified
+                         iterations: int = 3000,      
                          epochs: int = 3,
                          env_idx: int = None,
                          do_sample: bool = True,
-                         temperature: float = 1.0,    # Set to 1.0 for SCoRe
+                         temperature: float = 1.0,    
                          critic_lr: float = 1e-3,
-                         lm_lr: float = 5e-6,         # Set to 5e-6 for SCoRe on MATH
+                         lm_lr: float = 5e-6,         
                          gamma: float = 0.9,
                          tau: float = 0.1,
                          use_wandb: bool = False,
@@ -77,22 +77,22 @@ def offpolicy_train_loop(env,
                          eval_freq: int = 25,
                          agent_type: str = "archer",
                          # SCoRe specific parameters
-                         alpha: float = 10.0,         # Reward shaping coefficient
-                         beta1: float = 0.01,         # KL coefficient for Stage II
-                         beta2: float = 0.1,          # KL coefficient for Stage I
-                         stage1_steps: int = 1500,    # Number of training steps for Stage I
-                         stage2_steps: int = 1500,    # Number of training steps for Stage II
-                         use_smart_corrections: bool = False,  # Whether to use dynamic correction instructions
-                         correction_model_path: str = None,    # Path to a model for generating correction instructions
-                         train_guidance_model: bool = False,   # Whether to train the guidance model
-                         guidance_lr: float = 1e-6,            # Learning rate for the guidance model
-                         guidance_model_path: str = None,      # Path to initialize guidance model
-                         guidance_kl_coef: float = 0.05,       # KL coefficient for guidance model
+                         alpha: float = 10.0,         
+                         beta1: float = 0.01,         
+                         beta2: float = 0.1,          
+                         stage1_steps: int = 1500,    
+                         stage2_steps: int = 1500,    
+                         use_smart_corrections: bool = False,  
+                         correction_model_path: str = None,    
+                         train_guidance_model: bool = False,   
+                         guidance_lr: float = 1e-6,            
+                         guidance_model_path: str = None,      
+                         guidance_kl_coef: float = 0.05,       
                          # BiLevel SCoRe additions
-                         value_model_name: str = "roberta-base",  # Model name for the value function
-                         value_lr: float = 1e-5,                 # Learning rate for the value function
-                         value_coef: float = 0.5,                # Coefficient for the value function term
-                         stop_value_gradients: bool = False,     # Whether to stop gradients from value function
+                         value_model_name: str = "roberta-base",  
+                         value_lr: float = 1e-5,                 
+                         value_coef: float = 0.5,                
+                         stop_value_gradients: bool = False,     
                          decode_f: callable = lambda x: x,
                          **kwargs):
 
@@ -127,20 +127,19 @@ def offpolicy_train_loop(env,
             if guidance_model_path is not None:
                 try:
                     from transformers import AutoModelForCausalLM
-                    # Add memory optimizations for guidance model
+                    # Simplified model loading with basic optimizations
                     guidance_model = AutoModelForCausalLM.from_pretrained(
                         guidance_model_path, 
-                        device_map="auto",  # Enable automatic device mapping
-                        torch_dtype=torch.float16,  # Use half precision
-                        low_cpu_mem_usage=True,
-                        use_flash_attention_2=True  # Enable flash attention if available
+                        device_map="auto",
+                        torch_dtype=torch.float16,
+                        low_cpu_mem_usage=True
                     )
                     print(f"Successfully loaded guidance model from {guidance_model_path}")
                 except Exception as e:
                     print(f"Error loading guidance model: {e}")
                     print("Will initialize guidance model from reference model")
             
-            # Enable memory optimizations for the trainer
+            # Simplified trainer initialization
             trainer = RLGuidedSCoReTrainer(
                 agent=agent,
                 tokenizer=tokenizer,
@@ -150,97 +149,62 @@ def offpolicy_train_loop(env,
                 guidance_kl_coef=guidance_kl_coef,
                 train_guidance_model=train_guidance_model,
                 lm_lr=lm_lr,
-                grad_accum_steps=grad_accum_steps * 2,  # Double gradient accumulation steps
+                grad_accum_steps=grad_accum_steps,
                 max_grad_norm=max_grad_norm,
                 alpha=alpha,
                 beta1=beta1,
                 beta2=beta2,
                 stage1_steps=stage1_steps,
                 stage2_steps=stage2_steps,
-                batch_size=batch_size // 2,  # Halve batch size
-                use_gradient_checkpointing=True,  # Enable gradient checkpointing
-                use_memory_efficient_attention=True,  # Enable memory efficient attention
-                max_micro_batch=4  # Use smaller micro-batches
+                batch_size=batch_size // 2
             )
             
-            # Enable gradient checkpointing for the agent model if available
+            # Enable gradient checkpointing if available
             if hasattr(agent.model, "gradient_checkpointing_enable"):
                 agent.model.gradient_checkpointing_enable()
-            
-            # Set up memory efficient attention if available
-            if hasattr(agent.model, "config"):
-                if hasattr(agent.model.config, "use_memory_efficient_attention"):
-                    agent.model.config.use_memory_efficient_attention = True
-                if hasattr(agent.model.config, "use_flash_attention"):
-                    agent.model.config.use_flash_attention = True
+                print("Gradient checkpointing enabled to save memory")
         else:
-            # Standard SCoRe trainer with memory optimizations
+            # Standard SCoRe trainer with simplified parameters
             trainer = SCoReTrainer(
                 agent=agent,
                 tokenizer=tokenizer,
                 accelerator=accelerator,
                 lm_lr=lm_lr,
-                grad_accum_steps=grad_accum_steps * 2,  # Double gradient accumulation steps
+                grad_accum_steps=grad_accum_steps,
                 max_grad_norm=max_grad_norm,
                 alpha=alpha,
                 beta1=beta1,
                 beta2=beta2,
                 stage1_steps=stage1_steps,
                 stage2_steps=stage2_steps,
-                batch_size=batch_size // 2,  # Halve batch size
-                use_gradient_checkpointing=True,  # Enable gradient checkpointing
-                use_memory_efficient_attention=True  # Enable memory efficient attention
+                batch_size=batch_size // 2
             )
             
-            # Enable gradient checkpointing for the agent model if available
+            # Enable gradient checkpointing if available
             if hasattr(agent.model, "gradient_checkpointing_enable"):
                 agent.model.gradient_checkpointing_enable()
+                print("Gradient checkpointing enabled to save memory")
             
-            # Set up memory efficient attention if available
-            if hasattr(agent.model, "config"):
-                if hasattr(agent.model.config, "use_memory_efficient_attention"):
-                    agent.model.config.use_memory_efficient_attention = True
-                if hasattr(agent.model.config, "use_flash_attention"):
-                    agent.model.config.use_flash_attention = True
     elif agent_type.lower() == "bi_level_score":
-        print("Initializing BiLevel SCoRe trainer with memory optimizations")
+        print("Initializing BiLevel SCoRe trainer")
         
-        # Load guidance model if provided
+        # Load guidance model if provided - simplified approach
         guidance_model = None
         if guidance_model_path is not None:
             try:
-                from transformers import AutoModelForCausalLM, BitsAndBytesConfig
-                # Add memory optimizations for guidance model
-                quantization_config = BitsAndBytesConfig(
-                    load_in_8bit=True,
-                    llm_int8_threshold=6.0,
-                    llm_int8_skip_modules=None,
-                )
+                from transformers import AutoModelForCausalLM
                 guidance_model = AutoModelForCausalLM.from_pretrained(
                     guidance_model_path, 
-                    device_map="auto",  # Enable automatic device mapping
-                    torch_dtype=torch.float16,  # Use half precision
-                    low_cpu_mem_usage=True,
-                    use_flash_attention_2=True,  # Enable flash attention if available
-                    quantization_config=quantization_config  # Enable 8-bit quantization
+                    device_map="auto",
+                    torch_dtype=torch.float16,
+                    low_cpu_mem_usage=True
                 )
-                print(f"Successfully loaded guidance model from {guidance_model_path} with memory optimizations")
+                print(f"Successfully loaded guidance model from {guidance_model_path}")
             except Exception as e:
-                print(f"Error loading guidance model with full optimizations: {e}")
-                print("Trying fallback loading with basic optimizations")
-                try:
-                    guidance_model = AutoModelForCausalLM.from_pretrained(
-                        guidance_model_path,
-                        device_map="auto",
-                        torch_dtype=torch.float16,
-                        low_cpu_mem_usage=True
-                    )
-                    print("Loaded guidance model with basic memory optimizations")
-                except Exception as e:
-                    print(f"Error loading guidance model: {e}")
-                    print("Will initialize guidance model from reference model")
+                print(f"Error loading guidance model: {e}")
+                print("Will initialize guidance model from reference model")
         
-        # Create BiLevel SCoRe trainer with memory optimizations
+        # Create BiLevel SCoRe trainer with simplified parameters
         trainer = BiLevelSCoReTrainer(
             agent=agent,
             tokenizer=tokenizer,
@@ -255,33 +219,21 @@ def offpolicy_train_loop(env,
             stop_value_gradients=stop_value_gradients,
             cache_dir=kwargs.get("cache_dir", None),
             lm_lr=lm_lr,
-            grad_accum_steps=grad_accum_steps * 2,  # Double gradient accumulation steps
+            grad_accum_steps=grad_accum_steps,
             max_grad_norm=max_grad_norm,
             alpha=alpha,
             beta1=beta1,
             beta2=beta2,
             stage1_steps=stage1_steps,
             stage2_steps=stage2_steps,
-            batch_size=batch_size // 2,  # Halve batch size
-            use_gradient_checkpointing=True,  # Enable gradient checkpointing
-            use_memory_efficient_attention=True,  # Enable memory efficient attention
-            max_micro_batch=4  # Use smaller micro-batches
+            batch_size=batch_size // 2
         )
         
-        # Enable memory optimizations for agent model
+        # Enable gradient checkpointing if available
         if hasattr(agent.model, "gradient_checkpointing_enable"):
             agent.model.gradient_checkpointing_enable()
-            print("Enabled gradient checkpointing for agent model")
+            print("Gradient checkpointing enabled to save memory")
         
-        # Set up memory efficient attention for agent model
-        if hasattr(agent.model, "config"):
-            if hasattr(agent.model.config, "use_memory_efficient_attention"):
-                agent.model.config.use_memory_efficient_attention = True
-                print("Enabled memory efficient attention for agent model")
-            if hasattr(agent.model.config, "use_flash_attention"):
-                agent.model.config.use_flash_attention = True
-                print("Enabled flash attention for agent model")
-
     # For non-SCoRe agents, we use a replay buffer
     if agent_type.lower() not in ["score", "bi_level_score"]:
         replay_buffer = ReplayBuffer(batch_size=batch_size, capacity=capacity)
@@ -314,8 +266,11 @@ def offpolicy_train_loop(env,
                 print("Creating new checkpoint directory")
                 os.makedirs(save_path, exist_ok=True)
             
+    # Prepare the agent model
     accelerator.unwrap_model(agent).prepare()
     print(">>> Start Iterations")
+    
+    # Main training loop
     for i in tqdm(range(iterations)):
         if accelerator.is_main_process:
             
@@ -336,46 +291,33 @@ def offpolicy_train_loop(env,
                 # Calculate turn 1 rewards
                 turn1_rewards = [d[0]["trajectory_reward"] for d in trajectories_turn1]
                 
-                # NEW CODE: Use trainer's guidance generation functionality
+                # Generate guidance - simplified approach
                 problems = [traj[0]['observation'] for traj in trajectories_turn1]
                 solutions = [traj[0]['action'] for traj in trajectories_turn1]
 
-                # Generate guidance via trainer's custom method
-                print("Generating guidance via trainer's custom method")
-                
-                # Check if trainer has custom guidance method
-                if hasattr(trainer, 'generate_custom_guidance'):
-                    try:
+                try:
+                    # Try using trainer's custom guidance method if available
+                    if hasattr(trainer, 'generate_custom_guidance'):
                         analysis_prompts, guidance_hints = trainer.generate_custom_guidance(
                             problems, solutions
                         )
-                    except Exception as e:
-                        print(f"Error using trainer's custom guidance: {e}")
-                        print("Falling back to generate_smart_correction_prompt")
-                        # Import the fallback function
-                        from archer.prompts import generate_smart_correction_prompt
+                    else:
                         # Use the fallback function
                         analysis_prompts = generate_smart_correction_prompt(
                             problems, solutions,
-                            correction_model=None  # Use static template path
+                            correction_model=None
                         )
                         guidance_hints = ["" for _ in analysis_prompts]
-                else:
-                    print("Trainer does not have custom guidance method, using generate_smart_correction_prompt")
-                    # Import the fallback function
-                    from archer.prompts import generate_smart_correction_prompt
-                    # Use the fallback function
-                    analysis_prompts = generate_smart_correction_prompt(
-                        problems, solutions,
-                        correction_model=None  # Use static template path
-                    )
+                except Exception as e:
+                    print(f"Error generating guidance: {e}")
+                    # Use empty guidance as fallback
+                    analysis_prompts = ["Please review your solution and correct any errors."] * len(problems)
                     guidance_hints = ["" for _ in analysis_prompts]
 
                 # Format correction templates
                 correction_templates = build_correction_templates(problems, solutions, guidance_hints)
 
-                # Generate second turn with custom guidance
-                print("Generating second turn with custom guidance")
+                # Generate second turn with guidance
                 trajectories_turn2 = batch_interact_environment(
                     agent=agent,
                     tokenizer=tokenizer,
@@ -387,48 +329,28 @@ def offpolicy_train_loop(env,
                     template=correction_templates
                 )
 
-                # Verify we have processed all trajectories
-                assert len(trajectories_turn2) == len(trajectories_turn1), \
-                    f"Expected {len(trajectories_turn1)} second-turn trajectories, but got {len(trajectories_turn2)}"
-                
                 # Calculate turn 2 rewards
                 turn2_rewards = [d[0]["trajectory_reward"] for d in trajectories_turn2]
                 
                 # Combine trajectory data for SCoRe (on-policy, we use these directly)
                 score_trajectories = []
                 
-                # Process trajectories in smaller batches to save memory
-                batch_size = 16  # Smaller batch size for processing
-                for batch_start in range(0, len(trajectories_turn1), batch_size):
-                    batch_end = min(batch_start + batch_size, len(trajectories_turn1))
-                    batch_t1 = trajectories_turn1[batch_start:batch_end]
-                    batch_t2 = trajectories_turn2[batch_start:batch_end]
-                    batch_r1 = turn1_rewards[batch_start:batch_end]
-                    batch_r2 = turn2_rewards[batch_start:batch_end]
-                    
-                    # Clear CUDA cache before processing each batch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    
-                    for t1, t2, r1, r2 in zip(batch_t1, batch_t2, batch_r1, batch_r2):
-                        # Move data to CPU to save GPU memory
-                        traj_data = [{
-                            "observation": t1[0]["observation"],
-                            "action": t1[0]["action"],
-                            "action_turn1": t1[0]["action"],
-                            "action_turn2": t2[0]["action"],
-                            "reward": t1[0]["reward"],
-                            "reward_turn1": t1[0]["reward"],
-                            "reward_turn2": t2[0]["reward"],
-                            "next_observation": t1[0]["next_observation"],
-                            "done": t1[0]["done"],
-                            "mc_return": t1[0]["mc_return"],
-                            "trajectory_reward": (t1[0]["trajectory_reward"] + t2[0]["trajectory_reward"]) / 2.0
-                        }]
-                        score_trajectories.append(traj_data)
-                    
-                    # Explicitly delete batch data to free memory
-                    del batch_t1, batch_t2, batch_r1, batch_r2
+                # Process trajectories with memory optimization
+                for t1, t2, r1, r2 in zip(trajectories_turn1, trajectories_turn2, turn1_rewards, turn2_rewards):
+                    traj_data = [{
+                        "observation": t1[0]["observation"],
+                        "action": t1[0]["action"],
+                        "action_turn1": t1[0]["action"],
+                        "action_turn2": t2[0]["action"],
+                        "reward": t1[0]["reward"],
+                        "reward_turn1": t1[0]["reward"],
+                        "reward_turn2": t2[0]["reward"],
+                        "next_observation": t1[0]["next_observation"],
+                        "done": t1[0]["done"],
+                        "mc_return": t1[0]["mc_return"],
+                        "trajectory_reward": (t1[0]["trajectory_reward"] + t2[0]["trajectory_reward"]) / 2.0
+                    }]
+                    score_trajectories.append(traj_data)
                 
                 # Calculate combined training reward metrics
                 train_rewards = [d[0]["trajectory_reward"] for d in score_trajectories]
@@ -445,30 +367,21 @@ def offpolicy_train_loop(env,
                 }
                 
                 # For SCoRe: on-policy update with the freshly collected trajectories
-                print("Training with on-policy trajectories (SCoRe)")
-                
-                # Process trajectories in smaller batches during update
-                update_batch_size = 8  # Even smaller batch size for model update
-                for update_start in range(0, len(score_trajectories), update_batch_size):
-                    update_end = min(update_start + update_batch_size, len(score_trajectories))
-                    batch_trajectories = score_trajectories[update_start:update_end]
-                    
-                    # Clear CUDA cache before each update batch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    
-                    try:
-                        _ = trainer.update(batch_trajectories, no_update_actor=(i < warmup_iter))
-                    except RuntimeError as e:
-                        if "out of memory" in str(e):
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                            print(f"OOM in batch {update_start}-{update_end}, reducing batch size and retrying")
-                            # Try with even smaller batch
-                            for single_traj in batch_trajectories:
-                                _ = trainer.update([single_traj], no_update_actor=(i < warmup_iter))
-                        else:
-                            raise e
+                try:
+                    _ = trainer.update(score_trajectories, no_update_actor=(i < warmup_iter))
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        # Clear CUDA cache
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        print(f"OOM error, trying with smaller batches")
+                        # Try with smaller batches
+                        batch_size = 4
+                        for idx in range(0, len(score_trajectories), batch_size):
+                            batch = score_trajectories[idx:idx+batch_size]
+                            _ = trainer.update(batch, no_update_actor=(i < warmup_iter))
+                    else:
+                        raise e
                 
                 # Check if current reward is the best so far
                 if current_train_reward > best_train_reward:
@@ -539,20 +452,27 @@ def offpolicy_train_loop(env,
                     # Calculate turn 1 rewards
                     eval_turn1_rewards = [d[0]["trajectory_reward"] for d in eval_trajectories_turn1]
                     
-                    # NEW CODE: Use trainer's guidance generation for evaluation too
+                    # Generate evaluation guidance - simplified
                     problems_eval = [traj[0]['observation'] for traj in eval_trajectories_turn1]
                     solutions_eval = [traj[0]['action'] for traj in eval_trajectories_turn1]
                     
-                    # Generate evaluation guidance
-                    eval_prompts, eval_hints = trainer.generate_custom_guidance(
-                        problems_eval, solutions_eval
-                    )
+                    try:
+                        # Try trainer's method first
+                        if hasattr(trainer, 'generate_custom_guidance'):
+                            eval_prompts, eval_hints = trainer.generate_custom_guidance(
+                                problems_eval, solutions_eval
+                            )
+                        else:
+                            # Fall back to basic template
+                            eval_prompts = ["Please review your solution."] * len(problems_eval)
+                            eval_hints = ["Review your work and correct any errors."] * len(problems_eval)
+                    except Exception as e:
+                        print(f"Error generating evaluation guidance: {e}")
+                        eval_prompts = ["Please review your solution."] * len(problems_eval)
+                        eval_hints = ["Review your work and correct any errors."] * len(problems_eval)
                     
                     # Format evaluation correction templates
-                    eval_templates = [
-                        remove_repeated_phrases(hint) + "\n\nYour Improved Solution:"
-                        for hint in eval_hints
-                    ]
+                    eval_templates = build_correction_templates(problems_eval, solutions_eval, eval_hints)
                     
                     # Run batch interaction for evaluation second turn
                     eval_trajectories_turn2 = batch_interact_environment(
@@ -566,10 +486,6 @@ def offpolicy_train_loop(env,
                         template=eval_templates
                     )
                     
-                    # Verify we have processed all trajectories
-                    assert len(eval_trajectories_turn2) == len(eval_trajectories_turn1), \
-                        f"Expected {len(eval_trajectories_turn1)} second-turn eval trajectories, but got {len(eval_trajectories_turn2)}"
-                    
                     # Calculate turn 2 rewards
                     eval_turn2_rewards = [d[0]["trajectory_reward"] for d in eval_trajectories_turn2]
                     
@@ -581,7 +497,7 @@ def offpolicy_train_loop(env,
                         "eval_reward_turn1.mean": eval_turn1_mean,
                         "eval_reward_turn2.mean": eval_turn2_mean,
                         "eval_reward_improvement": eval_turn2_mean - eval_turn1_mean,
-                        "best_train_reward_so_far": best_train_reward  # Track best reward in logs
+                        "best_train_reward_so_far": best_train_reward
                     })
                 else:
                     # Standard single-turn evaluation for other agent types

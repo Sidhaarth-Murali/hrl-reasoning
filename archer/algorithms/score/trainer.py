@@ -9,13 +9,16 @@ import random
 import time
 import torch.nn.functional as F
 from archer.prompts import format_math_prompt, format_math_self_correction_prompt, generate_smart_correction_prompt
+import torch.nn as nn
+import numpy as np
+import os
+import sys
 
 def dict_mean(dict_list):
     """Calculate the mean of values in a list of dictionaries with the same keys."""
     mean_dict = {}
-    if len(dict_list) > 0:
-        for key in dict_list[0].keys():
-            mean_dict[key] = sum(d[key] for d in dict_list) / len(dict_list)
+    for key in dict_list[0].keys():
+        mean_dict[key] = sum(d[key] for d in dict_list) / len(dict_list)
     return mean_dict
 
 
@@ -63,48 +66,36 @@ class SCoReTrainer():
             
         if use_memory_efficient_attention and hasattr(agent.model, "use_memory_efficient_attention"):
             agent.model.use_memory_efficient_attention = True
-            print("Memory efficient attention enabled")
+            print("Using PyTorch's memory-efficient attention implementation")
         
-        # Create a frozen reference model for KL divergence calculation with memory optimizations
+        # Create a frozen reference model for KL divergence calculation
         print("Creating frozen reference model for KL divergence...")
         with torch.cuda.device(agent.model.device):
             torch.cuda.empty_cache()  # Clear memory before creating reference model
         
-        # Create reference model with memory optimizations
+        # Create reference model - simplified approach to avoid PEFT errors
         try:
-            # Try to use 8-bit quantization for reference model
-            from transformers import BitsAndBytesConfig
-            quantization_config = BitsAndBytesConfig(
-                load_in_8bit=True,
-                llm_int8_threshold=6.0,
-                llm_int8_skip_modules=None,
-            )
-            self.ref_model = type(accelerator.unwrap_model(agent.model)).from_pretrained(
-                agent.model.config._name_or_path,
-                device_map="auto",
-                quantization_config=quantization_config,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-            )
-            print("Created 8-bit quantized reference model")
-        except Exception as e:
-            print(f"Failed to create 8-bit reference model: {e}")
-            print("Falling back to standard model copy with CPU offloading")
-            # Fallback: Create copy on CPU first
+            # Simplified approach: create a direct copy of the model
             self.ref_model = copy.deepcopy(accelerator.unwrap_model(agent.model)).cpu()
-            # Move to GPU only when needed
+            # Move to device (GPU or CPU) as appropriate
+            device = 'cpu'  # Default to CPU
             if torch.cuda.is_available():
-                try:
-                    self.ref_model = self.ref_model.to(agent.model.device)
-                except Exception as e:
-                    print(f"Failed to move reference model to GPU: {e}")
-                    print("Keeping reference model on CPU")
+                # Check for available memory
+                free_mem = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+                # If we have enough memory (>4GB), use GPU
+                if free_mem > 4 * 1024 * 1024 * 1024:  # 4GB
+                    device = agent.model.device
+            
+            self.ref_model = self.ref_model.to(device)
+            print(f"Reference model successfully created and frozen on device: {device}")
+        except Exception as e:
+            print(f"Error creating reference model: {e}")
+            print("Creating a simpler copy")
+            self.ref_model = copy.deepcopy(accelerator.unwrap_model(agent.model)).cpu()
         
         # Freeze reference model parameters
         for p in self.ref_model.parameters():
             p.requires_grad = False
-        
-        print("Reference model created and frozen")
         
         # Initialize optimizer with memory-efficient settings
         self.lm_optimizer = torch.optim.Adam(agent.model.parameters(), lr=lm_lr)
