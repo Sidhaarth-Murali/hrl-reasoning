@@ -9,6 +9,7 @@ from archer.prompts import generate_smart_correction_prompt, format_math_self_co
 import torch.nn as nn
 import numpy as np
 import copy as _copy
+from typing import Tuple, List, Dict, Any
 
 class RLGuidedSCoReTrainer(SCoReTrainer):
     """
@@ -245,24 +246,47 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
                     # ----- generate guidance text with memory optimization -----
                     ctx = torch.enable_grad() if getattr(self, "train_guidance_model", False) else torch.no_grad()
                     with ctx:
-                        outputs = self.guidance_model.generate(
-                            input_ids=inputs["input_ids"],
-                            attention_mask=inputs["attention_mask"],
-                            max_new_tokens=256,
-                            temperature=0.7,
-                            top_p=0.95,
-                            do_sample=True,
-                            num_beams=2,
-                            use_cache=not getattr(self, "use_gradient_checkpointing", False),  # Disable KV cache if using gradient checkpointing
-                        )
+                        try:
+                            # Use a simpler generation config that works with PEFT models
+                            outputs = self.guidance_model.generate(
+                                input_ids=inputs["input_ids"],
+                                attention_mask=inputs["attention_mask"],
+                                max_new_tokens=256,
+                                temperature=0.7,
+                                top_p=0.95,
+                                do_sample=True,
+                                # Remove parameters that might cause issues with PEFT models
+                                use_cache=True
+                            )
 
-                        # ----- decode JUST the generated portion (strip input) -----
-                        input_lens = [len(ids) for ids in inputs["input_ids"]]
-                        for j, seq in enumerate(outputs):
-                            instr = self.tokenizer.decode(
-                                seq[input_lens[j]:], skip_special_tokens=True
-                            ).strip()
-                            guidance_texts.append(instr)
+                            # ----- decode JUST the generated portion (strip input) -----
+                            input_lens = [len(ids) for ids in inputs["input_ids"]]
+                            for j, seq in enumerate(outputs):
+                                instr = self.tokenizer.decode(
+                                    seq[input_lens[j]:], skip_special_tokens=True
+                                ).strip()
+                                guidance_texts.append(instr)
+                        except ValueError as e:
+                            if "not used by the model" in str(e):
+                                # Retry with minimal parameters if there's a parameter compatibility issue
+                                print(f"Parameter compatibility issue: {e}")
+                                print("Retrying with minimal parameters")
+                                
+                                outputs = self.guidance_model.generate(
+                                    input_ids=inputs["input_ids"],
+                                    attention_mask=inputs["attention_mask"],
+                                    max_new_tokens=256
+                                )
+                                
+                                # Decode outputs
+                                input_lens = [len(ids) for ids in inputs["input_ids"]]
+                                for j, seq in enumerate(outputs):
+                                    instr = self.tokenizer.decode(
+                                        seq[input_lens[j]:], skip_special_tokens=True
+                                    ).strip()
+                                    guidance_texts.append(instr)
+                            else:
+                                raise e
 
                 except RuntimeError as e:
                     if "out of memory" in str(e):
@@ -349,24 +373,47 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         # Generate
         ctx = torch.enable_grad() if getattr(self, "train_guidance_model", False) else torch.no_grad()
         with ctx:
-            outputs = self.guidance_model.generate(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                max_new_tokens=256,
-                temperature=0.7,
-                top_p=0.95,
-                do_sample=True,
-                num_beams=2,
-                use_cache=not getattr(self, "use_gradient_checkpointing", False),
-            )
-            
-            # Decode
-            input_lens = [len(ids) for ids in inputs["input_ids"]]
-            for j, seq in enumerate(outputs):
-                instr = self.tokenizer.decode(
-                    seq[input_lens[j]:], skip_special_tokens=True
-                ).strip()
-                guidance_texts.append(instr)
+            try:
+                # Use a simpler generation config that works with PEFT models
+                outputs = self.guidance_model.generate(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                    max_new_tokens=256,
+                    temperature=0.7,
+                    top_p=0.95,
+                    do_sample=True,
+                    # Remove parameters that might cause issues with PEFT models
+                    use_cache=True
+                )
+                
+                # Decode
+                input_lens = [len(ids) for ids in inputs["input_ids"]]
+                for j, seq in enumerate(outputs):
+                    instr = self.tokenizer.decode(
+                        seq[input_lens[j]:], skip_special_tokens=True
+                    ).strip()
+                    guidance_texts.append(instr)
+            except ValueError as e:
+                if "not used by the model" in str(e):
+                    # Retry with minimal parameters
+                    print(f"Parameter compatibility issue: {e}")
+                    print("Retrying with minimal parameters")
+                    
+                    outputs = self.guidance_model.generate(
+                        input_ids=inputs["input_ids"],
+                        attention_mask=inputs["attention_mask"],
+                        max_new_tokens=256
+                    )
+                    
+                    # Decode
+                    input_lens = [len(ids) for ids in inputs["input_ids"]]
+                    for j, seq in enumerate(outputs):
+                        instr = self.tokenizer.decode(
+                            seq[input_lens[j]:], skip_special_tokens=True
+                        ).strip()
+                        guidance_texts.append(instr)
+                else:
+                    raise e
         
         # Clean up
         del inputs, outputs

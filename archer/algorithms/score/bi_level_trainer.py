@@ -41,7 +41,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         **kwargs
     ):
         """
-        Initialize the BiLevelSCoReTrainer with memory optimizations.
+        Initialize the BiLevelSCoReTrainer.
         """
         super().__init__(
             agent=agent,
@@ -61,37 +61,15 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         self.value_coef = value_coef
         self.stop_value_gradients = stop_value_gradients
         
-        # Initialize the value function with memory-efficient settings
-        try:
-            from transformers import AutoConfig
-            config = AutoConfig.from_pretrained(
-                value_model_name,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True
-            )
-            if use_memory_efficient_attention:
-                config.use_memory_efficient_attention = True
-                config.use_flash_attention = True
-            
-            self.value_function = ValueFunction(
-                model_name=value_model_name,
-                device=agent.model.device,
-                cache_dir=cache_dir,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-                config=config
-            )
-            print("Initialized value function with memory optimizations")
-        except Exception as e:
-            print(f"Error initializing value function with full optimizations: {e}")
-            print("Falling back to basic initialization")
-            self.value_function = ValueFunction(
-                model_name=value_model_name,
-                device=agent.model.device,
-                cache_dir=cache_dir,
-                use_gradient_checkpointing=use_gradient_checkpointing
-            )
+        # Initialize the value function
+        self.value_function = ValueFunction(
+            model_name=value_model_name,
+            device=agent.model.device,
+            cache_dir=cache_dir,
+            use_gradient_checkpointing=use_gradient_checkpointing
+        )
         
-        # Create optimizer for the value function with gradient accumulation
+        # Create optimizer for the value function
         self.value_optimizer = torch.optim.Adam(
             self.value_function.parameters(),
             lr=value_lr
@@ -123,7 +101,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         
         # Process in smaller batches to save memory
         batch_size = len(problems)
-        max_batch_size = min(32, self.max_micro_batch)  # Use even smaller batches for value function
+        max_batch_size = 32  # Use larger batch size like in the working code
         
         total_loss = 0.0
         total_samples = 0
@@ -162,49 +140,13 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                 total_samples += current_batch_size
                 
                 # Only clear cache after backward pass is complete
-                # and we've saved any values we need
                 del values, batch_rewards, batch_loss, scaled_loss
                 self.clear_gpu_cache()
-                
             except RuntimeError as e:
                 if "out of memory" in str(e):
                     print(f"OOM in batch {i}-{end_idx}, trying with half batch size")
-                    # Try again with half the batch size
-                    half_size = (end_idx - i) // 2
-                    if half_size > 0:
-                        # Process first half
-                        self.clear_gpu_cache()
-                        mid_idx = i + half_size
-                        values = self.value_function.get_value(
-                            problems[i:mid_idx], 
-                            initial_solutions[i:mid_idx], 
-                            guidance_texts[i:mid_idx], 
-                            revised_solutions[i:mid_idx]
-                        ).squeeze()
-                        batch_rewards = rewards_tensor[i:mid_idx]
-                        batch_loss = F.mse_loss(values, batch_rewards)
-                        scaled_loss = batch_loss * half_size / max_batch_size
-                        self.accelerator.backward(scaled_loss)
-                        total_loss += batch_loss.item() * half_size
-                        total_samples += half_size
-                        del values, batch_rewards, batch_loss, scaled_loss
-                        self.clear_gpu_cache()
-                        
-                        # Process second half
-                        values = self.value_function.get_value(
-                            problems[mid_idx:end_idx], 
-                            initial_solutions[mid_idx:end_idx], 
-                            guidance_texts[mid_idx:end_idx], 
-                            revised_solutions[mid_idx:end_idx]
-                        ).squeeze()
-                        batch_rewards = rewards_tensor[mid_idx:end_idx]
-                        batch_loss = F.mse_loss(values, batch_rewards)
-                        scaled_loss = batch_loss * half_size / max_batch_size
-                        self.accelerator.backward(scaled_loss)
-                        total_loss += batch_loss.item() * half_size
-                        total_samples += half_size
-                        del values, batch_rewards, batch_loss, scaled_loss
-                        self.clear_gpu_cache()
+                    # Continue to next iteration
+                    continue
                 else:
                     raise e
         
@@ -216,12 +158,9 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         # Calculate average loss
         avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
         
-        # Safe to clear cache before new forward pass
-        self.clear_gpu_cache()
-        
-        # Calculate value predictions for reporting (use a small subset to save memory)
-        report_idx = min(batch_size, 16)  # Use even smaller subset for reporting
-        with torch.no_grad():  # Ensure we don't track gradients for reporting
+        # Calculate value predictions for reporting
+        report_idx = min(batch_size, 32)  # Use larger subset for reporting
+        with torch.no_grad():
             report_values = self.value_function.get_value(
                 problems[:report_idx], 
                 initial_solutions[:report_idx], 
@@ -235,7 +174,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                 'reward_mean': rewards_tensor[:report_idx].mean().item(),
             }
         
-        # Safe to clear at the end after all computations
+        # Clear cache before returning
         self.clear_gpu_cache()
         
         return metrics
@@ -438,19 +377,19 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         # Add KL penalty if configured (compute once for all batches to save computation)
         try:
             # Use a small subset for KL computation to save memory
-            kl_subset_size = min(batch_size, 16)  # Use even smaller subset for KL
+            kl_subset_size = min(batch_size, 32)  # Use larger subset like in the working code
             kl_div = self.calculate_guidance_kl_divergence(
                 problems[:kl_subset_size], 
                 initial_solutions[:kl_subset_size]
             )
             kl_loss = self.guidance_kl_coef * kl_div
             
-            # Apply KL penalty
+            # Apply KL penalty directly as in the working code
             self.accelerator.backward(kl_loss)
         except RuntimeError as e:
             if "out of memory" in str(e):
                 print("OOM during KL computation, skipping KL penalty for this batch")
-                kl_div = torch.tensor(0.0, device=device, requires_grad=True)
+                kl_div = torch.tensor(0.0, device=device)
                 kl_loss = torch.tensor(0.0, device=device)
             else:
                 raise e
@@ -469,6 +408,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             'guidance_kl_loss': kl_loss.item() if hasattr(kl_loss, 'item') else 0.0,
             'guidance_total_loss': avg_policy_loss + (kl_loss.item() if hasattr(kl_loss, 'item') else 0.0),
             'guidance_reward_mean': rewards_tensor.mean().item(),
+            'combined_loss': kl_loss.item() if hasattr(kl_loss, 'item') else 0.0,
         }
         
         # Add value function metrics
@@ -529,6 +469,64 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         self.accelerator.backward(scaled_loss)
         
         return batch_policy_loss.item() * batch_size
+
+    def calculate_guidance_kl_divergence(self, problems, initial_solutions):
+        """
+        Calculate KL divergence between guidance model and reference model.
+        This is used to regularize the guidance model updates.
+        
+        Args:
+            problems: List of math problems
+            initial_solutions: List of initial solutions
+            
+        Returns:
+            Tensor containing the KL divergence
+        """
+        self.clear_gpu_cache()
+        
+        # Generate analysis prompts
+        batch_size = len(problems)
+        analysis_prompts = []
+        
+        for p, s in zip(problems, initial_solutions):
+            prompt = (
+                "You are an expert math tutor reviewing a student's solution to a math problem.\n\n"
+                f"PROBLEM:{p}\n\n"
+                f"INITIAL SOLUTION:{s}\n\n"
+                "PROMPT: First, analyze the solution for errors or misconceptions. "
+                "Then, write a brief, helpful instruction that will guide the student toward "
+                "correcting their solution. Your instruction should be specific to the errors you "
+                "identified, but don't solve the problem for them. Your response should be ONLY the "
+                "instruction for the student to improve their solution, nothing else. "
+                "DO NOT include ANY SOLUTION.\n\n"
+                "GUIDING INSTRUCTION:"
+            )
+            analysis_prompts.append(prompt)
+        
+        # Instead of reimplementing the KL divergence calculation,
+        # use the parent class method but with the guidance model instead of agent model
+        original_model = self.agent.model
+        
+        try:
+            # Temporarily swap models for KL calculation
+            self.agent.model = self.guidance_model
+            
+            # Use parent class method to calculate KL divergence
+            kl_div = super().calculate_kl_divergence(analysis_prompts, [""] * len(analysis_prompts), self.ref_model)
+            
+            # Restore original model
+            self.agent.model = original_model
+            
+            return kl_div
+            
+        except Exception as e:
+            # Make sure to restore the model even if there's an error
+            self.agent.model = original_model
+            print(f"Error in KL calculation: {e}")
+            
+            # Return a default value on error
+            device = self.agent.model.device
+            return torch.tensor(0.0, device=device)
 
     def save(self, path):
         """

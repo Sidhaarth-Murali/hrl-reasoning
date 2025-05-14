@@ -29,89 +29,121 @@ def add_mc_return(trajectory, gamma = 0.95):
 
 def batch_interact_environment(agent, tokenizer, env, num_trajectories,
                                post_f=lambda x: x, use_tqdm=True, decode_f=lambda x: x,
-                               env_idx=None, max_steps=1, template=None):
+                               env_idx=None, max_steps=1, template=None, bsize=None):
     """
-    In a batched way, interact with the environments to get a list of trajectories.
-    Heavily optimized version for SCoRe's single-step trajectories.
+    Interact with a batch of environments.
     
     Args:
-        agent: The agent to use for generating actions
-        tokenizer: Tokenizer for the agent
-        env: Environment to interact with
-        num_trajectories: Number of trajectories to collect
-        post_f: Post-processing function to apply to trajectories
-        use_tqdm: Whether to show progress bar
-        decode_f: Function to decode actions
-        env_idx: Index of environment to use
-        max_steps: Maximum number of steps per trajectory
-        template: Optional template to use for prompting (for SMART_SCoRe)
+        agent: The agent to interact with the environment.
+        tokenizer: The tokenizer for the agent.
+        env: The environment to interact with.
+        num_trajectories: The number of trajectories to collect.
+        post_f: A function to apply to each trajectory after collection.
+        use_tqdm: Whether to use tqdm for progress reporting.
+        decode_f: A function to decode the agent's actions.
+        env_idx: The index of the environment to use.
+        max_steps: The maximum number of steps per trajectory.
+        template: A template for the agent to use for formatting prompts.
+        bsize: Optional batch size override (if none, uses environment batch size)
+    
+    Returns:
+        A list of trajectories.
     """
-    bsize = env.bsize  # Environment's batch size
+    # Use provided batch size or environment's batch size
+    bsize = bsize or env.bsize
     all_trajectories = []
     
     # Calculate optimal batch size - use a smaller batch size to avoid OOM
-    optimal_batch_size = min(bsize, 128)  # Limit max batch size to avoid OOM
+    optimal_batch_size = min(bsize, 16)  # Start with a smaller max batch size to avoid OOM
     
-    # Process in as few batches as possible
+    # Process in smaller batches to prevent memory issues
     num_batches = (num_trajectories + optimal_batch_size - 1) // optimal_batch_size  # Ceiling division
     
-    # Set up progress tracking - only show overall progress, not per batch
+    # Set up progress tracking
     pbar = tqdm(total=num_trajectories, desc="Samples", disable=not use_tqdm)
     
     trajectories_collected = 0
     correct_total = 0
+    
     # If a template is provided, update the agent's template
     if template is not None and hasattr(agent, 'update_template'):
         agent.update_template(template)
     
+    # Clear CUDA cache before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
     for batch_idx in range(num_batches):
-        # Calculate batch size for this iteration
-        current_batch_size = min(optimal_batch_size, num_trajectories - trajectories_collected)
-        
-        # Reset batch of environments without printing
-        batch_obs = env.reset(idx=env_idx)
-        if hasattr(env, 'get_current_histories'):
-            batch_obs = env.get_current_histories()
-        
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        try:
+            # Calculate batch size for this iteration
+            current_batch_size = min(optimal_batch_size, num_trajectories - trajectories_collected)
             
-        actions = agent.get_action(batch_obs)
-        batch_results = env.step(decode_f(actions))
-        
-        # Process results
-        trajectories = []
-        total_correct = 0  
-        
-        for i, result in enumerate(batch_results):
-            if result is None:
-                continue
+            # Reset batch of environments without printing
+            batch_obs = env.reset(idx=env_idx)
+            if hasattr(env, 'get_current_histories'):
+                batch_obs = env.get_current_histories()
+            
+            # Clear CUDA cache before agent action
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
                 
-            next_obs, reward, done = result
-            total_correct += int(reward) 
+            # Get actions from agent - will use its own batching internally
+            actions = agent.get_action(batch_obs)
             
-            traj = [{
-                "observation": batch_obs[i],
-                "next_observation": next_obs,
-                "reward": reward,
-                "done": done,
-                "action": actions[i]
-            }]
-            trajectories.append(post_f(add_mc_return(add_trajectory_reward(traj))))
+            # Take step in environment
+            batch_results = env.step(decode_f(actions))
+            
+            # Process results
+            trajectories = []
+            total_correct = 0  
+            
+            for i, result in enumerate(batch_results):
+                if result is None:
+                    continue
+                    
+                next_obs, reward, done = result
+                total_correct += int(reward) 
+                
+                traj = [{
+                    "observation": batch_obs[i],
+                    "next_observation": next_obs,
+                    "reward": reward,
+                    "done": done,
+                    "action": actions[i]
+                }]
+                trajectories.append(post_f(add_mc_return(add_trajectory_reward(traj))))
 
-        all_trajectories.extend(trajectories)
-        trajectories_collected += len(trajectories)
-        correct_total += total_correct
+            all_trajectories.extend(trajectories)
+            trajectories_collected += len(trajectories)
+            correct_total += total_correct
 
-        pbar.update(len(trajectories))
-        accuracy = correct_total / trajectories_collected if trajectories_collected else 0
-        pbar.set_postfix({
-            "Reward": f"{accuracy}",  
-            "Overall": f"{correct_total}/{trajectories_collected}"
-        })
-        
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            pbar.update(len(trajectories))
+            accuracy = correct_total / trajectories_collected if trajectories_collected else 0
+            pbar.set_postfix({
+                "Reward": f"{accuracy:.4f}",  
+                "Overall": f"{correct_total}/{trajectories_collected}"
+            })
+            
+            # Clear memory after processing batch
+            del batch_obs, actions, batch_results, trajectories
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                print(f"CUDA OOM with batch size {optimal_batch_size}, reducing batch size")
+                # Reduce batch size for future iterations
+                optimal_batch_size = max(1, optimal_batch_size // 2)
+                
+                # Clear CUDA cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Skip this batch and retry with smaller batch size
+                continue
+            else:
+                # Re-raise non-memory errors
+                raise e
     
     pbar.close()
     return all_trajectories
