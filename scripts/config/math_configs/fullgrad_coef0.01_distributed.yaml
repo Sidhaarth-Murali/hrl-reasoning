@@ -1,0 +1,158 @@
+defaults:
+  - score_math
+  - _self_
+
+# Override save path for this specific approach
+save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/full_0.01_distributed'
+
+# Make sure agent type is bi_level_score
+agent_type: "bi_level_score"
+
+# SCoRe parameters - explicitly added
+alpha: 10.0         # Reward shaping coefficient
+beta1: 0.01         # KL coefficient for Stage II
+beta2: 0.1          # KL coefficient for Stage I
+
+# RL-Guided SCoRe parameters - needed for bilevel implementation
+train_guidance_model: true         # Enable training for the guidance model
+guidance_lr: 1e-6                  # Learning rate for the guidance model
+guidance_kl_coef: 0.1             # KL coefficient for guidance model training
+guidance_model_path: null          # Path to initialize guidance model
+
+# SMART_SCoRe additions
+use_smart_corrections: true
+correction_model_path: null        # Added this missing parameter
+
+# DISTRIBUTED TRAINING CONFIGURATION
+distributed:
+  # Enable distributed training
+  enable: true
+  
+  # Multi-GPU strategy configuration
+  strategy: "ddp_find_unused_parameters"  # DDP with unused parameter detection
+  
+  # Model placement strategy for memory optimization
+  device_placement:
+    base_model_device: "cuda:0"        # Main LLM on GPU 0
+    critic_device: "cuda:0"            # Critic on same GPU as base model
+    target_critic_device: "cpu"        # Target critic on CPU to save GPU memory
+    guidance_model_device: "cuda:1"    # Guidance model on GPU 1
+    value_function_device: "cuda:1"    # Value function on GPU 1
+    reference_model_device: "cpu"      # Reference model on CPU to save GPU memory
+  
+  # Pipeline parallelism configuration
+  pipeline_parallel:
+    enable: true
+    stages:
+      - name: "trajectory_generation"
+        gpus: [0, 1]  # Both GPUs can generate trajectories in parallel
+        batch_split: true
+      - name: "guidance_training" 
+        gpus: [1]     # Guidance model training on GPU 1
+      - name: "base_training"
+        gpus: [0]     # Base model training on GPU 0
+      - name: "value_training"
+        gpus: [1]     # Value function training on GPU 1
+  
+  # Gradient synchronization
+  gradient_sync:
+    bucket_cap_mb: 25    # Smaller buckets for memory efficiency
+    find_unused_parameters: true
+    static_graph: false  # Dynamic graph for flexibility
+
+# MEMORY OPTIMIZATION SETTINGS
+memory_optimization:
+  # Enhanced gradient checkpointing
+  use_gradient_checkpointing: true
+  checkpoint_ratio: 0.5  # Checkpoint every other layer
+  
+  # Advanced memory techniques
+  use_memory_efficient_attention: true
+  use_flash_attention_2: true
+  use_bf16_mixed_precision: true
+  use_8bit_optimizers: true
+  offload_optimizer_states: true
+  
+  # CPU offloading strategy
+  cpu_offloading:
+    enable: true
+    offload_targets: ["reference_model", "target_critic"]
+    async_cpu_transfers: true
+  
+  # Memory monitoring
+  enable_memory_monitoring: true
+  memory_cleanup_frequency: 2  # Clear cache every 2 steps
+
+# BATCH PROCESSING OPTIMIZATION
+batch_optimization:
+  # Multi-GPU batch distribution
+  total_batch_size: 64        # Total across all GPUs
+  per_gpu_batch_size: 32      # Per GPU batch size
+  micro_batch_size: 4         # Micro-batch for gradient accumulation
+  gradient_accumulation_steps: 8
+  
+  # Dynamic batch sizing
+  adaptive_batch_sizing: true
+  min_batch_size: 2
+  max_batch_size: 8
+  
+  # Parallel data loading
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 2
+
+# COMMUNICATION OPTIMIZATION
+communication:
+  # Reduce communication overhead
+  gradient_compression: true
+  compression_ratio: 0.8
+  
+  # Asynchronous communication
+  async_grad_allreduce: true
+  overlap_communication: true
+  
+  # Bandwidth optimization
+  bucket_size_mb: 25
+  reduction_window_size: 20
+
+# PERFORMANCE MONITORING
+monitoring:
+  # Track distributed training metrics
+  log_gpu_utilization: true
+  log_memory_usage: true
+  log_communication_times: true
+  
+  # Profiling
+  enable_profiling: false
+  profile_memory: true
+  profile_communication: true
+
+# Bilevel optimization specific parameters
+value_model_name: "distilroberta-base"  # Smaller model for memory efficiency
+value_lr: 1e-5                     # Learning rate for the value function
+value_coef: 0.01                   
+stop_value_gradients: false       # Full gradient flow (as per fullgrad config)
+
+# Enhanced training parameters for distributed setup
+training:
+  warmup_steps: 100             # Warmup for distributed training
+  sync_bn: false                # Batch norm sync not needed for our models
+  find_unused_parameters: true  # Handle dynamic computation graphs
+  
+  # Checkpointing for fault tolerance
+  checkpoint_frequency: 50
+  save_intermediate_checkpoints: true
+  
+  # Load balancing
+  balance_gpu_usage: true
+  auto_scale_batch_size: true
+
+# Use a meaningful run name for tracking while keeping everything else consistent
+run_name: 'bi-level-fullgrad-c0.01-distributed'
+
+# Enhanced logging for distributed training
+wandb_config:
+  log_model_gradients: true
+  log_gpu_memory: true
+  log_communication_overhead: true
+  distributed_logging: true 

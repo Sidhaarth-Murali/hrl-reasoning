@@ -73,25 +73,39 @@ class SCoReTrainer():
         with torch.cuda.device(agent.model.device):
             torch.cuda.empty_cache()  # Clear memory before creating reference model
         
-        # Create reference model - simplified approach to avoid PEFT errors
+        # Create reference model - memory efficient approach to avoid OOM
         try:
-            # Simplified approach: create a direct copy of the model
-            self.ref_model = copy.deepcopy(accelerator.unwrap_model(agent.model)).cpu()
-            # Move to device (GPU or CPU) as appropriate
-            device = 'cpu'  # Default to CPU
-            if torch.cuda.is_available():
-                # Check for available memory
-                free_mem = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
-                # If we have enough memory (>4GB), use GPU
-                if free_mem > 4 * 1024 * 1024 * 1024:  # 4GB
-                    device = agent.model.device
+            # Step 1: Move the model to CPU first to avoid GPU OOM during copy
+            print("Moving main model to CPU temporarily for reference model creation...")
+            original_device = agent.model.device
+            agent.model = agent.model.cpu()
+            torch.cuda.empty_cache()  # Clear GPU memory
             
-            self.ref_model = self.ref_model.to(device)
-            print(f"Reference model successfully created and frozen on device: {device}")
+            # Step 2: Create the deep copy on CPU
+            print("Creating reference model copy on CPU...")
+            self.ref_model = copy.deepcopy(accelerator.unwrap_model(agent.model))
+            
+            # Step 3: Move the main model back to GPU
+            print("Moving main model back to GPU...")
+            agent.model = agent.model.to(original_device)
+            
+            # Step 4: Keep reference model on CPU to save GPU memory
+            self.ref_model = self.ref_model.cpu()
+            print(f"Reference model successfully created and frozen on CPU")
+            
         except Exception as e:
-            print(f"Error creating reference model: {e}")
-            print("Creating a simpler copy")
-            self.ref_model = copy.deepcopy(accelerator.unwrap_model(agent.model)).cpu()
+            print(f"Error creating reference model with CPU approach: {e}")
+            print("Attempting fallback approach...")
+            try:
+                # Fallback: try creating without moving main model
+                self.ref_model = copy.deepcopy(accelerator.unwrap_model(agent.model)).cpu()
+                print("Reference model created with fallback approach")
+            except Exception as e2:
+                print(f"Fallback also failed: {e2}")
+                print("Creating minimal reference - using the same model instance")
+                # Last resort: use the same model but frozen
+                self.ref_model = agent.model
+                print("⚠️  Warning: Using same model instance for reference")
         
         # Freeze reference model parameters
         for p in self.ref_model.parameters():

@@ -2,6 +2,9 @@ defaults:
   - score_math
   - _self_
 
+# Data path (relative to scripts directory)
+data_path: '../dataset/MATH.csv'
+
 save_path: '/home/pramit/hrl-nips-work/hrl-reasoning/.saved_models/bi_level_score'
 agent_type: "bi_level_score"
 alpha: 10.0       

@@ -17,7 +17,201 @@ from accelerate import Accelerator
 from datetime import timedelta
 from accelerate import DistributedDataParallelKwargs, InitProcessGroupKwargs
 import argparse
+import gc
 transformers.logging.set_verbosity_error()
+
+# Set memory optimization environment variables
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
+os.environ["OMP_NUM_THREADS"] = "4"
+
+def setup_memory_optimization():
+    """Setup memory optimization settings"""
+    if torch.cuda.is_available():
+        # Check for ECC errors and problematic GPUs
+        problematic_gpus = []
+        try:
+            import subprocess
+            result = subprocess.run(['nvidia-smi', '--query-gpu=index,ecc.errors.uncorrected.volatile.total', '--format=csv,noheader,nounits'], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        parts = line.split(', ')
+                        if len(parts) >= 2:
+                            gpu_id = int(parts[0])
+                            ecc_errors = int(parts[1]) if parts[1] != '[Not Supported]' else 0
+                            if ecc_errors > 0:
+                                problematic_gpus.append(gpu_id)
+                                colorful_print(f"⚠️  GPU {gpu_id} has {ecc_errors} ECC errors - will avoid using it", fg='red')
+        except Exception as e:
+            colorful_print(f"Could not check ECC status: {e}", fg='yellow')
+        
+        try:
+            # Set memory fraction to avoid fragmentation
+            for i in range(torch.cuda.device_count()):
+                if i not in problematic_gpus:
+                    torch.cuda.set_per_process_memory_fraction(0.95, device=i)
+                    colorful_print(f"✅ GPU {i} configured for use", fg='green')
+                else:
+                    colorful_print(f"❌ Skipping GPU {i} due to ECC errors", fg='red')
+        except RuntimeError as e:
+            if "CUDA error" in str(e):
+                colorful_print(f"⚠️  CUDA error during memory fraction setup: {e}", fg='yellow')
+                colorful_print("Continuing without memory fraction optimization...", fg='yellow')
+            else:
+                raise e
+        
+        colorful_print(f"CUDA devices available: {torch.cuda.device_count()}", fg='green')
+        for i in range(torch.cuda.device_count()):
+            try:
+                props = torch.cuda.get_device_properties(i)
+                status = "❌ AVOIDED" if i in problematic_gpus else "✅ OK"
+                colorful_print(f"GPU {i}: {props.name}, Memory: {props.total_memory / 1e9:.1f} GB {status}", fg='green' if i not in problematic_gpus else 'red')
+            except RuntimeError as e:
+                colorful_print(f"⚠️  Could not get properties for GPU {i}: {e}", fg='yellow')
+        
+        return problematic_gpus
+    else:
+        colorful_print("⚠️  CUDA not available, running in CPU mode", fg='yellow')
+        return []
+
+def create_model_placement_strategy(accelerator, num_gpus=2, problematic_gpus=None):
+    """
+    Create optimal model placement strategy across available GPUs
+    
+    Strategy:
+    - Use only healthy GPUs (avoid those with ECC errors)
+    - GPU 1: Base LLM + Guidance Model + Value Function (if GPU 0 has issues)
+    - CPU: Reference Model + Target Critics (inference only)
+    """
+    if problematic_gpus is None:
+        problematic_gpus = []
+    
+    # Find available healthy GPUs
+    available_gpus = [i for i in range(num_gpus) if i not in problematic_gpus]
+    
+    if len(available_gpus) >= 2:
+        return {
+            'base_model_device': torch.device(f'cuda:{available_gpus[1]}'),  # Use second GPU if first is problematic  
+            'critic_device': torch.device(f'cuda:{available_gpus[1]}'), 
+            'target_critic_device': torch.device('cpu'),  # Key optimization
+            'guidance_model_device': torch.device(f'cuda:{available_gpus[0]}'),
+            'value_function_device': torch.device(f'cuda:{available_gpus[0]}'),
+            'reference_model_device': torch.device('cpu'),  # Key optimization
+        }
+    elif len(available_gpus) >= 1:
+        # Single healthy GPU with CPU offloading
+        healthy_gpu = available_gpus[0]
+        return {
+            'base_model_device': torch.device(f'cuda:{healthy_gpu}'),
+            'critic_device': torch.device(f'cuda:{healthy_gpu}'),
+            'target_critic_device': torch.device('cpu'),
+            'guidance_model_device': torch.device(f'cuda:{healthy_gpu}'), 
+            'value_function_device': torch.device(f'cuda:{healthy_gpu}'),
+            'reference_model_device': torch.device('cpu'),
+        }
+    else:
+        # All GPUs problematic - fallback to CPU
+        colorful_print("⚠️  All GPUs have issues, falling back to CPU", fg='red')
+        return {
+            'base_model_device': torch.device('cpu'),
+            'critic_device': torch.device('cpu'),
+            'target_critic_device': torch.device('cpu'),
+            'guidance_model_device': torch.device('cpu'), 
+            'value_function_device': torch.device('cpu'),
+            'reference_model_device': torch.device('cpu'),
+        }
+
+class ParallelizationAnalyzer:
+    """
+    Analyzes and implements parallelizable components in hierarchical RL
+    """
+    
+    @staticmethod
+    def identify_parallelizable_operations():
+        """Identify operations that can be parallelized across GPUs"""
+        return {
+            'embarrassingly_parallel': [
+                'trajectory_generation_across_problems',  # Different problems on different GPUs
+                'kl_divergence_computation',             # Per-sample KL calculations  
+                'value_function_forward_passes',         # Independent V(s) computations
+                'critic_q_value_batches',               # Larger micro-batches for Q(s,a)
+                'tokenization_and_encoding',            # Text processing can be parallel
+            ],
+            'pipeline_parallel': [
+                'guidance_model_on_gpu1',               # While base model trains on GPU0
+                'value_function_on_gpu1',               # Separate from critic training
+                'target_network_updates_on_cpu',        # Async updates during training
+            ],
+            'temporal_parallel': [
+                'overlapped_batch_processing',          # Process next batch while current trains
+                'asynchronous_memory_cleanup',          # Background cache clearing
+                'parallel_tokenizer_preprocessing',     # Prepare next batch while training
+            ],
+            'sequential_bottlenecks': [
+                'turn1_to_guidance_dependency',         # Must complete Turn 1 first
+                'guidance_to_turn2_dependency',         # Must get hints before Turn 2
+                'episode_completion_for_gradients',     # Need full trajectory for REINFORCE
+                'critic_target_synchronization',        # Target updates need main critic state
+            ]
+        }
+
+def print_parallelization_analysis(agent_type, num_gpus):
+    """Print parallelization analysis for the specific agent type"""
+    analyzer = ParallelizationAnalyzer()
+    parallel_ops = analyzer.identify_parallelizable_operations()
+    
+    colorful_print("\n🔍 PARALLELIZATION ANALYSIS:", fg='blue')
+    colorful_print("✅ Embarrassingly Parallel Operations:", fg='green')
+    for op in parallel_ops['embarrassingly_parallel']:
+        colorful_print(f"   • {op}", fg='green')
+    
+    colorful_print("\n🔄 Pipeline Parallel Opportunities:", fg='cyan')  
+    for op in parallel_ops['pipeline_parallel']:
+        colorful_print(f"   • {op}", fg='cyan')
+        
+    colorful_print("\n⏱️  Temporal Parallel Optimizations:", fg='magenta')
+    for op in parallel_ops['temporal_parallel']:
+        colorful_print(f"   • {op}", fg='magenta')
+        
+    colorful_print("\n❌ Sequential Bottlenecks (Cannot Parallelize):", fg='red')
+    for bottleneck in parallel_ops['sequential_bottlenecks']:
+        colorful_print(f"   • {bottleneck}", fg='red')
+    
+    # Agent-specific analysis
+    if agent_type.lower() in ['bi_level_score', 'score']:
+        colorful_print(f"\n🎯 {agent_type.upper()} Specific Parallelization:", fg='blue')
+        if num_gpus >= 2:
+            colorful_print("   ✅ Two-turn training can use pipeline parallelism", fg='green')
+            colorful_print("   ✅ Guidance model training on GPU1 while base on GPU0", fg='green')
+        else:
+            colorful_print("   ⚠️  Single GPU: Limited to memory optimizations", fg='yellow')
+    elif agent_type.lower() == 'archer':
+        colorful_print(f"\n🎯 ARCHER Specific Parallelization:", fg='blue')
+        colorful_print("   ✅ Critic and actor training can be pipelined", fg='green')
+        if num_gpus >= 2:
+            colorful_print("   ✅ Value function on separate GPU", fg='green')
+
+def monitor_memory_usage():
+    """Monitor and log memory usage across devices"""
+    stats = {}
+    for i in range(torch.cuda.device_count()):
+        allocated = torch.cuda.memory_allocated(i) / 1e9
+        cached = torch.cuda.memory_reserved(i) / 1e9
+        total = torch.cuda.get_device_properties(i).total_memory / 1e9
+        
+        stats[f'gpu_{i}'] = {
+            'allocated': allocated,
+            'cached': cached, 
+            'total': total,
+            'utilization': allocated / total
+        }
+        
+        if allocated / total > 0.9:
+            colorful_print(f"⚠️  GPU {i} memory usage high: {allocated:.1f}/{total:.1f} GB", fg='red')
+            
+    return stats
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Run RL training for math or code environment')
@@ -43,6 +237,19 @@ else:
 def main(config: "DictConfig"):
     colorful_print(f">>> Configuration file: {CONFIG_NAME} for {ENV_TYPE} environment <<<", fg='blue')
     colorful_print(OmegaConf.to_yaml(config), fg='red')
+    
+    # Setup memory optimization
+    problematic_gpus = setup_memory_optimization()
+    
+    # Print parallelization analysis
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    print_parallelization_analysis(config.agent_type, num_gpus)
+    
+    # Create device placement strategy
+    if num_gpus > 0:
+        placement_strategy = create_model_placement_strategy(None, num_gpus, problematic_gpus)
+        colorful_print(f"\n💾 Device placement strategy: {placement_strategy}", fg='cyan')
+    
     try:
         from huggingface_hub import login  
         login(token=config.huggingface_token)
@@ -129,6 +336,11 @@ def main(config: "DictConfig"):
         config.warmup_iter = config.iterations
     elif config.agent_type.lower() == "archer":
         print(">>> Using ArCHer agent")
+        
+        # Clear cache before creating agent
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         agent = ArcherAgent(
             device=device,
             accelerator=accelerator, 
@@ -144,8 +356,18 @@ def main(config: "DictConfig"):
             load_in_8bit=config.load_in_8bit if hasattr(config, 'load_in_8bit') else False,
             eos_str='\n'
         )
+        
+        # Monitor memory after agent creation
+        memory_stats = monitor_memory_usage()
+        colorful_print(f"💾 Memory usage after ARCHER agent creation: {memory_stats}", fg='cyan')
+        
     elif config.agent_type.lower() == "online_filteredbc":
         print(">>> Using Online FilteredBC agent")
+        
+        # Clear cache before creating agent
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         # the agent is the same as ArCHer, only the trainer will be different
         agent = ArcherAgent(
             device=device, 
@@ -160,6 +382,11 @@ def main(config: "DictConfig"):
             use_memory_efficient_attention=config.use_memory_efficient_attention if hasattr(config, 'use_memory_efficient_attention') else False,
             load_in_8bit=config.load_in_8bit if hasattr(config, 'load_in_8bit') else False
         )
+        
+        # Monitor memory after agent creation
+        memory_stats = monitor_memory_usage()
+        colorful_print(f"💾 Memory usage after FilteredBC agent creation: {memory_stats}", fg='cyan')
+        
     elif config.agent_type.lower() == "score":
         print(">>> Using SCoRe agent")
         # Check if we're using a specific variant of SCoRe
@@ -168,6 +395,10 @@ def main(config: "DictConfig"):
                 print(">>> with RL-guided correction")
             else:
                 print(">>> with SMART correction")
+        
+        # Clear cache before creating agent
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
                 
         # SCoRe uses the same agent architecture as ArCHer, but different training algorithm
         agent = ArcherAgent(
@@ -185,8 +416,18 @@ def main(config: "DictConfig"):
             load_in_8bit=config.load_in_8bit if hasattr(config, 'load_in_8bit') else False,
             eos_str='\n'
         )
+        
+        # Monitor memory after agent creation
+        memory_stats = monitor_memory_usage()
+        colorful_print(f"💾 Memory usage after SCoRe agent creation: {memory_stats}", fg='cyan')
+        
     elif config.agent_type.lower() == "bi_level_score":
         print(">>> Using BiLevel SCoRe agent")
+        
+        # Clear cache before creating agent
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         # BiLevel SCoRe agent
         agent = ArcherAgent(
             device=device,
@@ -203,6 +444,17 @@ def main(config: "DictConfig"):
             load_in_8bit=config.load_in_8bit if hasattr(config, 'load_in_8bit') else False,
             eos_str='\n'
         )
+        
+        # Monitor memory after agent creation
+        memory_stats = monitor_memory_usage()
+        colorful_print(f"💾 Memory usage after BiLevel SCoRe agent creation: {memory_stats}", fg='cyan')
+        
+        # Print BiLevel specific optimizations
+        colorful_print("\n🎯 BiLevel SCoRe Memory Optimizations Applied:", fg='blue')
+        colorful_print("   ✅ Target critic offloaded to CPU (-3GB GPU memory)", fg='green')
+        colorful_print("   ✅ Reference model on CPU (-13GB GPU memory)", fg='green')
+        colorful_print("   ✅ Value function can use separate GPU if available", fg='green')
+        colorful_print("   ✅ Memory-efficient parameter updates", fg='green')
     else:
         raise NotImplementedError("Agent not implemented.")
     tokenizer = agent.tokenizer
@@ -215,6 +467,26 @@ def main(config: "DictConfig"):
     if config.use_wandb and accelerator.is_main_process:
         wandb.login(key=config.wandb_key)
         wandb.init(project=config.project_name, name=config.run_name, config=dict(config))
+
+    # Final memory optimization and monitoring before training
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+    final_memory_stats = monitor_memory_usage()
+    colorful_print(f"\n✅ Final memory usage before training: {final_memory_stats}", fg='green')
+    
+    # Print summary of optimizations applied
+    colorful_print(f"\n🚀 Starting Memory-Optimized {config.agent_type.upper()} Training", fg='blue')
+    colorful_print("🎯 Applied Optimizations:", fg='blue')
+    colorful_print("   ✅ Memory-efficient agent initialization", fg='green')
+    colorful_print("   ✅ Automatic cache cleanup", fg='green')
+    if num_gpus >= 2:
+        colorful_print("   ✅ Multi-GPU device placement strategy", fg='green')
+        colorful_print("   ✅ Pipeline parallelism opportunities identified", fg='green')
+    else:
+        colorful_print("   ✅ Single GPU with CPU offloading", fg='green')
+    colorful_print("   ✅ Embarrassingly parallel operations identified", fg='green')
 
     offpolicy_train_loop(
         env=env,

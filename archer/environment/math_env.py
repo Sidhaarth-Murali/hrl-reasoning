@@ -76,6 +76,7 @@ class LLMMathEnv():
     ):
         self.max_tokens = max_tokens
         self.test_mode = test_mode
+        self.data_path = data_path  # Store data_path as an attribute
         self.curr_problem = None
         self.curr_answer = None
         self.history = ''
@@ -178,7 +179,7 @@ class LLMMathEnv():
         return self.history
 
     def copy(self):
-        env = LLMMathEnv(max_tokens=self.max_tokens)
+        env = LLMMathEnv(max_tokens=self.max_tokens, data_path=self.data_path)  # Pass data_path
         env.problems = self.problems
         env.answers = self.answers
         env.explanations = self.explanations

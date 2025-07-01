@@ -1,0 +1,60 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: MULTI_GPU
+downcast_bf16: 'no'
+gpu_ids: all
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 2
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+
+# Advanced DDP settings for hierarchical RL
+ddp_bucket_cap_mb: 25
+ddp_broadcast_buffers: false
+ddp_find_unused_parameters: true
+ddp_gradient_as_bucket_view: true
+ddp_static_graph: false
+
+# Memory optimization settings
+gradient_accumulation_steps: 8
+gradient_clipping: 1.0
+dataloader_config:
+  split_batches: true
+  even_batches: true
+  use_seedable_sampler: true
+
+# Communication optimization
+nccl_timeout: 1800
+nccl_async_error_handling: true
+
+# Model parallelism support
+model_parallel: false
+pipeline_parallel: false
+tensor_parallel: false
+
+# Advanced memory management
+offload_optimizer_state: false
+offload_param: false
+zero_stage: 0
+
+# Logging and monitoring
+logging_dir: './logs/distributed'
+log_level: INFO
+log_on_each_node: true
+main_process_only: false
+
+# DeepSpeed integration (optional)
+deepspeed_config_file: null
+zero_optimization: false
+
+# Performance optimizations
+use_slowmo: false
+slowmo_momentum: 0.0
+slowmo_frequency: 1 

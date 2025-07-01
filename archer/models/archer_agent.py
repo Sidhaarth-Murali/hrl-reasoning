@@ -15,6 +15,12 @@ class ArcherAgent(torch.nn.Module):
                 do_sample = True, temperature = 0.9, max_new_tokens = 512, use_bfloat16 = False, eos_str = '\n', use_gradient_checkpointing = False, use_memory_efficient_attention = False,
                 load_in_8bit = False):
         super(ArcherAgent, self).__init__()
+        
+        # Memory optimization: Clear cache at start
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # 1. Load base model with memory optimizations
         if True:
             # Use 8-bit quantization if requested to save memory
             if load_in_8bit:
@@ -26,7 +32,12 @@ class ArcherAgent(torch.nn.Module):
                     device_map="auto"
                 )
             else:
-                self.model = AutoModelForCausalLM.from_pretrained(policy_lm, cache_dir=cache_dir).to(device)
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    policy_lm, 
+                    cache_dir=cache_dir,
+                    torch_dtype=torch.bfloat16 if use_bfloat16 else torch.float32,
+                    low_cpu_mem_usage=True
+                ).to(device)
             
         # Enable gradient checkpointing to save memory if requested
         if use_gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
@@ -41,6 +52,10 @@ class ArcherAgent(torch.nn.Module):
             elif hasattr(self.model.config, "attention_implementation"):
                 self.model.config.attention_implementation = "flash_attention_2"
                 print("Flash Attention 2 enabled for model")
+        
+        # Clear cache after base model loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
             
         if use_lora:
             from peft import LoraConfig, TaskType, get_peft_model
@@ -82,9 +97,24 @@ class ArcherAgent(torch.nn.Module):
 
         self.template = TEMPLATE
         self.policy_lm = policy_lm
-        self.critic = DoubleCritic(device, accelerator, critic_lm = critic_lm, cache_dir = cache_dir, in_dim = 768, out_dim = 1)  
-        self.target_critic = DoubleCritic(device, accelerator, critic_lm = critic_lm, cache_dir = cache_dir, in_dim = 768, out_dim = 1) 
-        self.soft_update_target_critic(1)
+        
+        # 2. Initialize critic on GPU
+        print("Initializing main critic...")
+        self.critic = DoubleCritic(device, accelerator, critic_lm = critic_lm, cache_dir = cache_dir, in_dim = 768, out_dim = 1)
+        
+        # Clear cache after critic initialization
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        # 3. CRITICAL: Initialize target critic on CPU to save GPU memory
+        print("Initializing target critic on CPU to save memory...")
+        cpu_device = torch.device('cpu')
+        self.target_critic = DoubleCritic(cpu_device, accelerator, critic_lm = critic_lm, cache_dir = cache_dir, in_dim = 768, out_dim = 1)
+        
+        # 4. MEMORY-EFFICIENT TARGET UPDATE: Copy parameters without full GPU allocation
+        print("Performing memory-efficient target critic initialization...")
+        self._memory_efficient_target_update(tau=1.0)
+        
         self.tokenizer = AutoTokenizer.from_pretrained(policy_lm, trust_remote_code=True, cache_dir=cache_dir)
         self.tokenizer.truncation_side = 'left'
         if self.tokenizer.pad_token is None:
@@ -99,7 +129,7 @@ class ArcherAgent(torch.nn.Module):
         self.accelerator = accelerator
         self.max_new_tokens = max_new_tokens
         self.eos_str = eos_str
-    
+
     def prepare(self):
         self.model, self.critic, self.target_critic = self.accelerator.prepare(
             self.model, self.critic, self.target_critic
@@ -253,7 +283,23 @@ class ArcherAgent(torch.nn.Module):
         return self.critic.get_v(inputs, detach_model = detach_model)
     
     def get_target_q(self, observation, action, detach_model=False):
-        return self.target_critic.get_q(observation, action, detach_model = detach_model)
+        """
+        Modified to handle CPU-based target critic.
+        Temporarily moves data to CPU for target computation.
+        """
+        # Move inputs to CPU for target critic computation
+        original_device = observation[0] if isinstance(observation, list) else None
+        
+        # Use target critic on CPU
+        with torch.no_grad():
+            q1, q2 = self.target_critic.get_q(observation, action, detach_model=True)
+            
+            # Move results back to original device if needed
+            if hasattr(q1, 'to'):
+                q1 = q1.to(self.device)
+                q2 = q2.to(self.device)
+                
+        return q1, q2
 
     def get_log_prob(self, observation, action):
         obs_ids = self.tokenizer(observation, return_tensors='pt', padding=True, max_length=512, truncation = True).to(self.device)
@@ -276,14 +322,53 @@ class ArcherAgent(torch.nn.Module):
         else:
             return torch.sum(torch.log(selected_prediction_probs)*action_ids["attention_mask"], dim = 1)
 
-    def soft_update_target_critic(self, tau):
-        # for target_critic, critic in zip(self.target_critics, self.critics):
-        for target_param, param in zip(
-                self.target_critic.parameters(), self.critic.parameters()
-            ):
+    def _memory_efficient_target_update(self, tau):
+        """
+        Memory-efficient target critic update that avoids OOM by:
+        1. Processing parameters in chunks
+        2. Using CPU operations when possible
+        3. Clearing cache frequently
+        """
+        print(f"Updating target critic with tau={tau} (memory-efficient)")
+        
+        # Get parameter iterators
+        target_params = list(self.target_critic.parameters())
+        source_params = list(self.critic.parameters())
+        
+        # Process parameters in chunks to avoid memory spikes
+        chunk_size = 10  # Process 10 parameters at a time
+        
+        for i in range(0, len(target_params), chunk_size):
+            end_idx = min(i + chunk_size, len(target_params))
+            
+            # Clear cache before processing each chunk
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            for j in range(i, end_idx):
+                target_param = target_params[j]
+                source_param = source_params[j]
+                
+                # Move source param to CPU temporarily to save GPU memory
+                source_data = source_param.data.cpu()
+                
+                # Update target parameter (which is already on CPU)
                 target_param.data.copy_(
-                    target_param.data * (1.0 - tau) + param.data * tau
+                    target_param.data * (1.0 - tau) + source_data * tau
                 )
+                
+                # Clean up temporary tensor
+                del source_data
+            
+            # Clear cache after each chunk
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        print("Target critic update completed")
+
+    def soft_update_target_critic(self, tau):
+        """Use memory-efficient update method"""
+        self._memory_efficient_target_update(tau)
 
     def update_template(self, new_template):
         """Update the template used by the agent for formatting prompts.
