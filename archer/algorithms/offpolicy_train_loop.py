@@ -336,15 +336,17 @@ def offpolicy_train_loop(env,
                 score_trajectories = []
                 
                 # Process trajectories with memory optimization
-                for t1, t2, r1, r2 in zip(trajectories_turn1, trajectories_turn2, turn1_rewards, turn2_rewards):
+                for idx, (t1, t2, r1, r2) in enumerate(zip(trajectories_turn1, trajectories_turn2, turn1_rewards, turn2_rewards)):
                     traj_data = [{
                         "observation": t1[0]["observation"],
+                        "problem": problems[idx] if idx < len(problems) else t1[0]["observation"],
                         "action": t1[0]["action"],
                         "action_turn1": t1[0]["action"],
                         "action_turn2": t2[0]["action"],
                         "reward": t1[0]["reward"],
                         "reward_turn1": t1[0]["reward"],
                         "reward_turn2": t2[0]["reward"],
+                        "guidance_text": guidance_hints[idx] if idx < len(guidance_hints) else "",
                         "next_observation": t1[0]["next_observation"],
                         "done": t1[0]["done"],
                         "mc_return": t1[0]["mc_return"],

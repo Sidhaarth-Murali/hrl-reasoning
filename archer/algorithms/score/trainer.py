@@ -367,6 +367,9 @@ class SCoReTrainer():
         total_kl = 0.0
         total_policy_loss_turn1 = 0.0
         total_policy_loss_turn2 = 0.0
+        total_value_loss = 0.0
+        total_value_sum = 0.0
+        total_value_count = 0
         
         # Track metrics for reporting
         all_shaped_rewards = []
@@ -379,6 +382,8 @@ class SCoReTrainer():
         device = self.agent.model.device
         reward_turn1_tensor = torch.tensor(reward_turn1, device=device, dtype=torch.float32)
         reward_turn2_tensor = torch.tensor(reward_turn2, device=device, dtype=torch.float32)
+        problem_all = kwargs.get("problem", observation)
+        guidance_all = kwargs.get("guidance_text", [""] * len(observation))
         
         # Apply reward shaping to turn 2: r2 + alpha * (r2 - r1)
         shaped_reward_turn2 = reward_turn2_tensor + self.alpha * (reward_turn2_tensor - reward_turn1_tensor)
@@ -394,8 +399,8 @@ class SCoReTrainer():
             obs_batch = [observation[j] for j in range(i, end_idx)]
             act1_batch = [action_turn1[j] for j in range(i, end_idx)]
             act2_batch = [action_turn2[j] for j in range(i, end_idx)]
-            r1_batch = reward_turn1_tensor[batch_slice]
-            shaped_r2_batch = shaped_reward_turn2[batch_slice]
+            problem_batch = [problem_all[j] for j in range(i, end_idx)]
+            guidance_batch = [guidance_all[j] for j in range(i, end_idx)]
             
             # Create correction prompts
             correction_prompts = [format_math_self_correction_prompt(o + a1) for o, a1 in zip(obs_batch, act1_batch)]
@@ -409,7 +414,25 @@ class SCoReTrainer():
             batch_kl = kl_div_turn1 + kl_div_turn2
             total_kl += batch_kl.item() * current_batch_size
             
-            # Calculate log probabilities for both turns (REINFORCE)
+            # --- Value function for solver advantage (if available) ---
+            values = None
+            value_loss = torch.tensor(0.0, device=device)
+            if hasattr(self, "value_function"):
+                values = self.value_function.get_value(
+                    problem_batch,
+                    act1_batch,
+                    guidance_batch,
+                    act2_batch,
+                    detach_base_model=False
+                ).squeeze()
+                # MSE to reward_turn2
+                value_loss = F.mse_loss(values, reward_turn2_tensor[batch_slice])
+                # Advantage for policy terms
+                advantages = (reward_turn2_tensor[batch_slice] - values).detach()
+            else:
+                advantages = reward_turn2_tensor[batch_slice]
+            
+            # Calculate log probabilities for both turns (REINFORCE with advantage)
             log_prob_turn1 = self.agent.get_log_prob(obs_batch, act1_batch)
             if log_prob_turn1.dim() > 1:
                 log_prob_turn1 = log_prob_turn1.flatten()
@@ -418,20 +441,24 @@ class SCoReTrainer():
             if log_prob_turn2.dim() > 1:
                 log_prob_turn2 = log_prob_turn2.flatten()
             
-            # Calculate components of loss
-            policy_loss_turn1 = torch.mean(log_prob_turn1 * r1_batch)
-            policy_loss_turn2 = torch.mean(log_prob_turn2 * shaped_r2_batch)
+            # Calculate components of loss using advantage
+            policy_loss_turn1 = torch.mean(log_prob_turn1 * advantages)
+            policy_loss_turn2 = torch.mean(log_prob_turn2 * advantages)
             
             # Scale the batch KL regulation by batch size
             reg_loss = self.beta1 * batch_kl * (current_batch_size / batch_size)
             
-            # Final loss for this micro-batch
-            batch_loss = -(policy_loss_turn1 + policy_loss_turn2) + reg_loss
+            # Final loss for this micro-batch (include value loss if computed)
+            batch_loss = -(policy_loss_turn1 + policy_loss_turn2) + reg_loss + value_loss
             
             # Accumulate metrics
             total_policy_loss_turn1 += policy_loss_turn1.item() * current_batch_size
             total_policy_loss_turn2 += policy_loss_turn2.item() * current_batch_size
             total_loss += batch_loss.item() * current_batch_size
+            if hasattr(self, "value_function"):
+                total_value_loss += value_loss.item() * current_batch_size
+                total_value_sum += values.detach().mean().item() * current_batch_size
+                total_value_count += current_batch_size
             
             # Backward pass with scaling
             scaled_loss = batch_loss * (current_batch_size / max_micro_batch)
@@ -449,6 +476,8 @@ class SCoReTrainer():
         avg_kl = total_kl / batch_size
         avg_policy_loss_turn1 = total_policy_loss_turn1 / batch_size
         avg_policy_loss_turn2 = total_policy_loss_turn2 / batch_size
+        avg_value_loss = total_value_loss / batch_size if total_value_count > 0 else 0.0
+        avg_value_mean = total_value_sum / total_value_count if total_value_count > 0 else 0.0
         
         reward_turn1_mean = sum(reward_turn1) / len(reward_turn1)
         reward_turn2_mean = sum(reward_turn2) / len(reward_turn2)
@@ -459,7 +488,9 @@ class SCoReTrainer():
             "stage2_reward_turn1_mean": reward_turn1_mean,
             "stage2_reward_turn2_mean": reward_turn2_mean,
             "stage2_shaped_reward_mean": shaped_reward_mean,
-            "stage2_kl_div": avg_kl
+            "stage2_kl_div": avg_kl,
+            "stage2_value_loss": avg_value_loss,
+            "stage2_value_mean": avg_value_mean
         }
     
     def clear_gpu_cache(self):
@@ -592,10 +623,12 @@ class SCoReTrainer():
             # Extract data from the trajectory
             processed_data.append({
                 "observation": traj[0]["observation"],
+                "problem": traj[0].get("problem", traj[0]["observation"]),
                 "action_turn1": traj[0]["action_turn1"],
                 "action_turn2": traj[0]["action_turn2"],
                 "reward_turn1": traj[0]["reward_turn1"],
-                "reward_turn2": traj[0]["reward_turn2"]
+                "reward_turn2": traj[0]["reward_turn2"],
+                "guidance_text": traj[0].get("guidance_text", "")
             })
         
         return processed_data

@@ -69,81 +69,53 @@ def batch_interact_environment(agent, tokenizer, env, num_trajectories,
     if template is not None and hasattr(agent, 'update_template'):
         agent.update_template(template)
     
-    # Clear CUDA cache before starting
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    
     for batch_idx in range(num_batches):
-        try:
-            # Calculate batch size for this iteration
-            current_batch_size = min(optimal_batch_size, num_trajectories - trajectories_collected)
-            
-            # Reset batch of environments without printing
-            batch_obs = env.reset(idx=env_idx)
-            if hasattr(env, 'get_current_histories'):
-                batch_obs = env.get_current_histories()
-            
-            # Clear CUDA cache before agent action
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
-            # Get actions from agent - will use its own batching internally
-            actions = agent.get_action(batch_obs)
-            
-            # Take step in environment
-            batch_results = env.step(decode_f(actions))
-            
-            # Process results
-            trajectories = []
-            total_correct = 0  
-            
-            for i, result in enumerate(batch_results):
-                if result is None:
-                    continue
-                    
-                next_obs, reward, done = result
-                total_correct += int(reward) 
-                
-                traj = [{
-                    "observation": batch_obs[i],
-                    "next_observation": next_obs,
-                    "reward": reward,
-                    "done": done,
-                    "action": actions[i]
-                }]
-                trajectories.append(post_f(add_mc_return(add_trajectory_reward(traj))))
-
-            all_trajectories.extend(trajectories)
-            trajectories_collected += len(trajectories)
-            correct_total += total_correct
-
-            pbar.update(len(trajectories))
-            accuracy = correct_total / trajectories_collected if trajectories_collected else 0
-            pbar.set_postfix({
-                "Reward": f"{accuracy:.4f}",  
-                "Overall": f"{correct_total}/{trajectories_collected}"
-            })
-            
-            # Clear memory after processing batch
-            del batch_obs, actions, batch_results, trajectories
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
-        except RuntimeError as e:
-            if "CUDA out of memory" in str(e):
-                print(f"CUDA OOM with batch size {optimal_batch_size}, reducing batch size")
-                # Reduce batch size for future iterations
-                optimal_batch_size = max(1, optimal_batch_size // 2)
-                
-                # Clear CUDA cache
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                # Skip this batch and retry with smaller batch size
+        # Calculate batch size for this iteration
+        current_batch_size = min(optimal_batch_size, num_trajectories - trajectories_collected)
+        
+        # Reset batch of environments without printing
+        batch_obs = env.reset(idx=env_idx)
+        if hasattr(env, 'get_current_histories'):
+            batch_obs = env.get_current_histories()
+        
+        # Get actions from agent
+        actions = agent.get_action(batch_obs)
+        
+        # Take step in environment
+        batch_results = env.step(decode_f(actions))
+        
+        # Process results
+        trajectories = []
+        total_correct = 0  
+        
+        for i, result in enumerate(batch_results):
+            if result is None:
                 continue
-            else:
-                # Re-raise non-memory errors
-                raise e
+                
+            next_obs, reward, done = result
+            total_correct += int(reward) 
+            
+            traj = [{
+                "observation": batch_obs[i],
+                "next_observation": next_obs,
+                "reward": reward,
+                "done": done,
+                "action": actions[i]
+            }]
+            trajectories.append(post_f(add_mc_return(add_trajectory_reward(traj))))
+
+        all_trajectories.extend(trajectories)
+        trajectories_collected += len(trajectories)
+        correct_total += total_correct
+
+        pbar.update(len(trajectories))
+        accuracy = correct_total / trajectories_collected if trajectories_collected else 0
+        pbar.set_postfix({
+            "Reward": f"{accuracy:.4f}",  
+            "Overall": f"{correct_total}/{trajectories_collected}"
+        })
+        
+        del batch_obs, actions, batch_results, trajectories
     
     pbar.close()
     return all_trajectories

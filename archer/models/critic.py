@@ -1,6 +1,5 @@
 import torch
 import transformers
-from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModel
 from typing import Tuple
 import torch.nn as nn
@@ -15,11 +14,7 @@ class DoubleCritic(torch.nn.Module):
         self.base_lm = AutoModel.from_pretrained(critic_lm, cache_dir=cache_dir).to(device)
         self.base_tokenizer = AutoTokenizer.from_pretrained(critic_lm, cache_dir=cache_dir)
         self.base_tokenizer.truncation_side = 'right'  # Keep beginning of math problems
-        
-        # Math-specific attention layer
-        self.math_attention = nn.MultiheadAttention(in_dim, num_heads=8).to(device)
-        
-        # Enhanced critic networks
+
         self.critic1 = nn.Sequential(
             nn.Linear(in_dim*2, in_dim),
             nn.LeakyReLU(),
@@ -43,8 +38,7 @@ class DoubleCritic(torch.nn.Module):
             nn.LeakyReLU(),
             nn.Linear(in_dim//2, out_dim)
         ).to(device)
-        
-        # Enhanced value networks
+
         self.v_critic1 = nn.Sequential(
             nn.Linear(in_dim, in_dim),
             nn.LeakyReLU(),

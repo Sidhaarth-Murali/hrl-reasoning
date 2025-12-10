@@ -206,84 +206,41 @@ class LLMBatchedMathEnv():
         # Load model and tokenizer with memory optimizations
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        try:
-            # Try to use 8-bit quantization and other memory optimizations
-            from transformers import BitsAndBytesConfig
-            quantization_config = BitsAndBytesConfig(
-                load_in_8bit=True,
-                llm_int8_threshold=6.0,
-                llm_int8_skip_modules=None,
-            )
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, 
-                cache_dir=cache_dir,
-                device_map="auto",
-                quantization_config=quantization_config,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-            )
-            print("Loaded model with 8-bit quantization")
-        except Exception as e:
-            print(f"Failed to load with 8-bit quantization: {e}")
-            print("Falling back to standard loading with memory optimizations")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, 
-                cache_dir=cache_dir,
-                device_map="auto",
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-            ).to(self.device)
-        
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name, 
+            cache_dir=cache_dir,
+            device_map="auto",
+            torch_dtype=torch.float16,
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
         
-        # Smart correction settings
         self.use_smart_corrections = use_smart_corrections
         self.train_guidance_model = train_guidance_model
         
-        # Initialize correction model - use same model instance when possible
         if use_smart_corrections:
             if correction_model_path and correction_model_path != model_name:
                 try:
-                    print(f"Loading separate correction model from {correction_model_path}")
                     self.correction_model = AutoModelForCausalLM.from_pretrained(
                         correction_model_path, 
                         cache_dir=cache_dir,
                         device_map="auto",
                         torch_dtype=torch.float16,
-                        low_cpu_mem_usage=True,
                     )
-                except Exception as e:
-                    print(f"Error loading correction model: {e}")
-                    print("Falling back to using main model for corrections")
+                except Exception:
                     self.correction_model = self.model
                     self.use_smart_corrections = True
             else:
-                # Use the same model for both tasks to save memory
-                print("Using same model instance for corrections to save memory")
                 self.correction_model = self.model
         else:
             self.correction_model = None
         
-        # Load custom weights if provided
         if env_load_path:
             try:
-                # Load weights on CPU first
                 weights = torch.load(env_load_path, map_location='cpu')
                 self.model.load_state_dict(weights['model_state_dict'])
-                print(f"Loaded model weights from {env_load_path}")
                 del weights
-                torch.cuda.empty_cache()
-            except Exception as e:
-                print(f"Error loading model weights: {e}")
-        
-        # Enable memory optimizations
-        if hasattr(self.model, "gradient_checkpointing_enable"):
-            self.model.gradient_checkpointing_enable()
-        if hasattr(self.model, "config"):
-            if hasattr(self.model.config, "use_memory_efficient_attention"):
-                self.model.config.use_memory_efficient_attention = True
-            elif hasattr(self.model.config, "attention_implementation"):
-                self.model.config.attention_implementation = "flash_attention_2"
+            except Exception:
+                pass
 
     def generate_tokens(self, states):
         """Generate next token for each state"""
