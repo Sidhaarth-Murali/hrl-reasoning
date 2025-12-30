@@ -30,6 +30,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         guidance_lr=1e-6,
         guidance_kl_coef=0.05,
         train_guidance_model=True,
+        train_solver=True,
         value_model_name="distilroberta-base",
         value_lr=1e-5,
         value_coef=0.5,
@@ -51,6 +52,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             guidance_lr=guidance_lr,
             guidance_kl_coef=guidance_kl_coef,
             train_guidance_model=train_guidance_model,
+            train_solver=train_solver,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_memory_efficient_attention=use_memory_efficient_attention,
             max_micro_batch=max_micro_batch,
@@ -117,13 +119,17 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             batch_slice = slice(i, end_idx)
             current_batch_size = end_idx - i
             
+            # Determine if base model should be detached
+            solver_fixed = self.solver_fixed
+            
             try:
                 # Get value estimates for this batch
                 values = self.value_function.get_value(
                     problems[batch_slice], 
                     initial_solutions[batch_slice], 
                     guidance_texts[batch_slice], 
-                    revised_solutions[batch_slice]
+                    revised_solutions[batch_slice],
+                    detach_base_model=False
                 ).squeeze()
                 
                 # Calculate MSE loss for this batch
@@ -165,7 +171,8 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                 problems[:report_idx], 
                 initial_solutions[:report_idx], 
                 guidance_texts[:report_idx], 
-                revised_solutions[:report_idx]
+                revised_solutions[:report_idx],
+                detach_base_model=False
             ).squeeze()
             
             metrics = {
@@ -288,6 +295,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                 # Get value estimates for this batch with appropriate gradient settings
                 if self.stop_value_gradients:
                     print("🔒 Gradient flow blocked from value function to guidance model.")
+                        
                     with torch.no_grad():
                         batch_values = self.value_function.get_value(
                             problems[batch_slice], 
@@ -308,17 +316,14 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                     ).squeeze()
 
                 # Combine direct rewards with value estimates
-                batch_rewards = rewards_tensor[batch_slice]
-                batch_rewards = torch.tensor(batch_rewards, dtype=torch.float, device=device, requires_grad=True)
-                self.value_coef = torch.tensor(self.value_coef, dtype=torch.float, device=device, requires_grad=True)
-
-                combined_rewards = batch_rewards + self.value_coef * batch_values
+                batch_rewards = torch.tensor(rewards_tensor[batch_slice], dtype=torch.float, device=device)
+                v_coef = torch.tensor(self.value_coef, dtype=torch.float, device=device)
+                combined_rewards = batch_rewards + v_coef * batch_values
                 
                 # Compute log probabilities for the guidance texts
                 batch_prompts = [analysis_prompts[j] for j in range(i, end_idx)]
                 batch_texts = [guidance_texts[j] for j in range(i, end_idx)]
                 log_probs = self.calculate_guidance_log_probs(batch_prompts, batch_texts)
-                log_probs = log_probs.detach().requires_grad_()  
 
                 # Calculate policy gradient loss with the combined rewards
                 batch_policy_loss = -torch.mean(log_probs * combined_rewards)
@@ -339,7 +344,7 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                         # Process first half
                         self.clear_gpu_cache()
                         mid_idx = i + half_size
-                        self._process_policy_gradient_batch(
+                        batch_policy_loss_val = self._process_policy_gradient_batch(
                             problems[i:mid_idx],
                             initial_solutions[i:mid_idx],
                             guidance_texts[i:mid_idx],
@@ -350,10 +355,13 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                             half_size,
                             max_pg_batch
                         )
+                        total_policy_loss += batch_policy_loss_val
+                        total_samples += half_size
                         
                         # Process second half
                         self.clear_gpu_cache()
-                        self._process_policy_gradient_batch(
+                        remaining_size = end_idx - mid_idx
+                        batch_policy_loss_val = self._process_policy_gradient_batch(
                             problems[mid_idx:end_idx],
                             initial_solutions[mid_idx:end_idx],
                             guidance_texts[mid_idx:end_idx],
@@ -361,9 +369,11 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
                             rewards_tensor[mid_idx:end_idx],
                             analysis_prompts[mid_idx:end_idx],
                             guidance_texts[mid_idx:end_idx],
-                            half_size,
+                            remaining_size,
                             max_pg_batch
                         )
+                        total_policy_loss += batch_policy_loss_val
+                        total_samples += remaining_size
                 else:
                     raise e
             
@@ -380,7 +390,8 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             kl_subset_size = min(batch_size, 32)  # Use larger subset like in the working code
             kl_div = self.calculate_guidance_kl_divergence(
                 problems[:kl_subset_size], 
-                initial_solutions[:kl_subset_size]
+                initial_solutions[:kl_subset_size],
+                guidance_texts[:kl_subset_size]
             )
             kl_loss = self.guidance_kl_coef * kl_div
             
@@ -455,13 +466,12 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
             ).squeeze()
 
         # Combine rewards
-        batch_rewards = torch.tensor(rewards_tensor, dtype=torch.float, device=device, requires_grad=True)
-        value_coef = torch.tensor(self.value_coef, dtype=torch.float, device=device, requires_grad=True)
-        combined_rewards = batch_rewards + value_coef * batch_values
+        batch_rewards = torch.tensor(rewards_tensor, dtype=torch.float, device=device)
+        v_coef = torch.tensor(self.value_coef, dtype=torch.float, device=device)
+        combined_rewards = batch_rewards + v_coef * batch_values
         
         # Get log probs
         log_probs = self.calculate_guidance_log_probs(analysis_prompts, guidance_texts_for_probs)
-        log_probs = log_probs.detach().requires_grad_()
         
         # Calculate and apply loss
         batch_policy_loss = -torch.mean(log_probs * combined_rewards)
@@ -469,64 +479,6 @@ class BiLevelSCoReTrainer(RLGuidedSCoReTrainer):
         self.accelerator.backward(scaled_loss)
         
         return batch_policy_loss.item() * batch_size
-
-    def calculate_guidance_kl_divergence(self, problems, initial_solutions):
-        """
-        Calculate KL divergence between guidance model and reference model.
-        This is used to regularize the guidance model updates.
-        
-        Args:
-            problems: List of math problems
-            initial_solutions: List of initial solutions
-            
-        Returns:
-            Tensor containing the KL divergence
-        """
-        self.clear_gpu_cache()
-        
-        # Generate analysis prompts
-        batch_size = len(problems)
-        analysis_prompts = []
-        
-        for p, s in zip(problems, initial_solutions):
-            prompt = (
-                "You are an expert math tutor reviewing a student's solution to a math problem.\n\n"
-                f"PROBLEM:{p}\n\n"
-                f"INITIAL SOLUTION:{s}\n\n"
-                "PROMPT: First, analyze the solution for errors or misconceptions. "
-                "Then, write a brief, helpful instruction that will guide the student toward "
-                "correcting their solution. Your instruction should be specific to the errors you "
-                "identified, but don't solve the problem for them. Your response should be ONLY the "
-                "instruction for the student to improve their solution, nothing else. "
-                "DO NOT include ANY SOLUTION.\n\n"
-                "GUIDING INSTRUCTION:"
-            )
-            analysis_prompts.append(prompt)
-        
-        # Instead of reimplementing the KL divergence calculation,
-        # use the parent class method but with the guidance model instead of agent model
-        original_model = self.agent.model
-        
-        try:
-            # Temporarily swap models for KL calculation
-            self.agent.model = self.guidance_model
-            
-            # Use parent class method to calculate KL divergence
-            kl_div = super().calculate_kl_divergence(analysis_prompts, [""] * len(analysis_prompts), self.ref_model)
-            
-            # Restore original model
-            self.agent.model = original_model
-            
-            return kl_div
-            
-        except Exception as e:
-            # Make sure to restore the model even if there's an error
-            self.agent.model = original_model
-            print(f"Error in KL calculation: {e}")
-            
-            # Return a default value on error
-            device = self.agent.model.device
-            return torch.tensor(0.0, device=device)
 
     def save(self, path):
         """

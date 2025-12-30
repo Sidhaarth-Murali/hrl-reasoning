@@ -152,7 +152,7 @@ for i in tqdm(range(0, len(eval_dataset), batch_size), desc="Batches"):
     analysis_prompts = build_analysis_prompts(problems, turn1_sols)
     guidances = generate_custom_guidance(
         analysis_prompts,
-        guider_model,          # <‑‑ use guider here
+        guider_model,          
         tokenizer,
         device,
         batch_size=batch_size,

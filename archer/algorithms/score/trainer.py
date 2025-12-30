@@ -198,19 +198,19 @@ class SCoReTrainer():
                     sub_chunk_kl = sub_chunk_kl.sum(dim=-1)  # Sum over vocab
                     
                     # Apply attention mask and get mean
-                    valid_tokens = chunk_attention_mask.sum().item()
-                    sub_chunk_kl = (sub_chunk_kl * chunk_attention_mask).sum() / valid_tokens
+                    mask = chunk_attention_mask.float()
+                    valid_tokens = mask.sum()
                     
-                    chunk_kl_div += sub_chunk_kl.item()
-                    chunk_tokens += valid_tokens
+                    if valid_tokens > 0:
+                        # Maintain gradient by not using .item() here
+                        sub_chunk_kl_mean = (sub_chunk_kl * mask).sum() / valid_tokens
+                        
+                        kl_div_sum += sub_chunk_kl_mean * valid_tokens.item()
+                        total_tokens += valid_tokens.item()
                     
                     # Clean up GPU memory
                     del outputs_current, outputs_ref, log_probs_current, probs_ref, sub_chunk_kl
                     self.clear_gpu_cache()
-                
-                # Accumulate KL divergence weighted by number of tokens
-                kl_div_sum += chunk_kl_div * chunk_tokens
-                total_tokens += chunk_tokens
                 
                 # Clean up chunk tensors
                 del obs_ids, act_ids, input_ids, attention_mask
@@ -228,13 +228,18 @@ class SCoReTrainer():
                             [action[single_idx]], 
                             reference_model
                         )
-                        kl_div_sum += single_result.item()
+                        # single_result is a tensor with gradient
+                        kl_div_sum += single_result 
                         total_tokens += 1
                 else:
                     raise e
         
-        # Return average KL divergence across all tokens
-        return torch.tensor(kl_div_sum / total_tokens, device=self.agent.model.device)
+        # Return average KL divergence across all tokens as a tensor with gradient
+        if total_tokens > 0:
+            if isinstance(kl_div_sum, float):
+                return torch.tensor(kl_div_sum / total_tokens, device=self.agent.model.device, requires_grad=True)
+            return kl_div_sum / total_tokens
+        return torch.tensor(0.0, device=self.agent.model.device, requires_grad=True)
     
     def stage1_loss(self, observation, action_turn1, action_turn2, reward_turn1, reward_turn2, **kwargs):
         """

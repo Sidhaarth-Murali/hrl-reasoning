@@ -29,7 +29,8 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         guidance_lr: float = 1e-6,
         guidance_kl_coef: float = 0.05,
         train_guidance_model: bool = True,
-        max_micro_batch: int = 4,  # Reduced from 8 to 4 for better memory efficiency
+        train_solver: bool = True,
+        max_micro_batch: int = 4,  
         use_gradient_checkpointing: bool = True,
         use_memory_efficient_attention: bool = True,
         **kwargs
@@ -44,9 +45,14 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
             **kwargs
         )
         self.train_guidance_model = train_guidance_model
+        self.train_solver = train_solver
         self.guidance_kl_coef = guidance_kl_coef
 
-        # Initialize or clone guidance model
+    @property
+    def solver_fixed(self):
+        return not getattr(self, "train_solver", True)
+
+    # Initialize or clone guidance model
         if guidance_model is not None:
             print("Using provided guidance model")
             self.guidance_model = guidance_model
@@ -497,9 +503,9 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
             return {'guidance_loss': 0.0}
 
         device = self.agent.model.device
-        # Symmetric rewards: {0->-1,1->+1}
-        shaped_r = [1 if r>0 else -1 for r in raw_r]
-        rewards_tensor = torch.tensor(shaped_r, dtype=torch.float, device=device)
+        # Symmetric rewards: {0->-1, 1->+1}
+        shaped_rewards = [1 if r > 0 else -1 for r in raw_r]
+        rewards_tensor = torch.tensor(shaped_rewards, dtype=torch.float, device=device)
 
         # Process in smaller batches for memory efficiency
         total_loss = 0.0
@@ -543,7 +549,7 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
                         # Process first half
                         self.clear_gpu_cache()
                         mid_idx = i + half_size
-                        self._process_policy_gradient_batch(
+                        total_loss, total_samples = self._process_policy_gradient_batch(
                             analysis_prompts[i:mid_idx],
                             guidance_texts[i:mid_idx],
                             rewards_tensor[i:mid_idx],
@@ -555,11 +561,11 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
                         
                         # Process second half
                         self.clear_gpu_cache()
-                        self._process_policy_gradient_batch(
+                        total_loss, total_samples = self._process_policy_gradient_batch(
                             analysis_prompts[mid_idx:end_idx],
                             guidance_texts[mid_idx:end_idx],
                             rewards_tensor[mid_idx:end_idx],
-                            half_size,
+                            (end_idx - mid_idx),
                             max_guidance_batch,
                             total_loss,
                             total_samples
@@ -574,9 +580,29 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
             if 'scaled_loss' in locals(): del scaled_loss
             self.clear_gpu_cache()
         
-        # Update the guidance model after processing all batches
+        # Add KL penalty if configured
+        kl_div = torch.tensor(0.0, device=device)
+        kl_loss = torch.tensor(0.0, device=device)
+        try:
+            # Use a smaller subset for KL computation to save memory
+            kl_subset_size = min(batch_size, 16)
+            kl_div = self.calculate_guidance_kl_divergence(
+                problems[:kl_subset_size], 
+                sols[:kl_subset_size],
+                guidance_texts[:kl_subset_size]
+            )
+            kl_loss = self.guidance_kl_coef * kl_div
+            self.accelerator.backward(kl_loss)
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                print("OOM during KL computation, skipping KL penalty")
+            else:
+                raise e
+        
+        # Update the guidance model after processing all batches (Policy + KL)
         self.accelerator.clip_grad_norm_(self.guidance_model.parameters(), self.max_grad_norm)
         self.guidance_optimizer.step()
+        self.guidance_optimizer.zero_grad()
         
         # Calculate average loss
         avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
@@ -586,6 +612,8 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
 
         return {
             'guidance_loss': avg_loss,
+            'guidance_kl_loss': kl_loss.item() if hasattr(kl_loss, 'item') else 0.0,
+            'guidance_total_loss': avg_loss + (kl_loss.item() if hasattr(kl_loss, 'item') else 0.0),
             'guidance_reward_mean': rewards_tensor.mean().item(),
         }
 
@@ -619,7 +647,48 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         
         return total_loss, total_samples
 
-    def update(self, trajectories, no_update_actor=False):
+    def calculate_guidance_kl_divergence(self, problems, initial_solutions, guidance_texts):
+        """
+        Calculate KL divergence between guidance model and reference model.
+        This is used to regularize the guidance model updates.
+        """
+        self.clear_gpu_cache()
+        
+        # Generate analysis prompts
+        analysis_prompts = []
+        for p, s in zip(problems, initial_solutions):
+            prompt = (
+                "You are an expert math tutor reviewing a student's solution to a math problem.\n\n"
+                f"PROBLEM:{p}\n\n"
+                f"INITIAL SOLUTION:{s}\n\n"
+                "PROMPT: First, analyze the solution for errors or misconceptions. "
+                "Then, write a brief, helpful instruction that will guide the student toward "
+                "correcting their solution. Your instruction should be specific to the errors you "
+                "identified, but don't solve the problem for them. Your response should be ONLY the "
+                "instruction for the student to improve their solution, nothing else. "
+                "DO NOT include ANY SOLUTION.\n\n"
+                "GUIDING INSTRUCTION:"
+            )
+            analysis_prompts.append(prompt)
+        
+        # Swap models for KL calculation
+        original_model = self.agent.model
+        try:
+            self.agent.model = self.guidance_model
+            
+            # Ensure ref_model is in eval mode and no gradients are tracked
+            self.ref_model.eval()
+            with torch.no_grad():
+                kl_div = super().calculate_kl_divergence(analysis_prompts, guidance_texts, self.ref_model)
+            
+            return kl_div
+        except Exception as e:
+            print(f"Error in KL calculation: {e}")
+            return torch.tensor(0.0, device=original_model.device)
+        finally:
+            self.agent.model = original_model
+
+    def update(self, trajectories, no_update_actor=False, is_partial=False):
         """
         Update both the base model and guidance model.
         Memory-optimized implementation.
@@ -627,7 +696,16 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
         # Clear cache before starting
         self.clear_gpu_cache()
         
-        info = super().update(trajectories, no_update_actor)
+        # Solver update is skipped if train_solver is False
+        solver_fixed = self.solver_fixed
+        info = super().update(trajectories, no_update_actor or solver_fixed)
+        
+        # If solver is fixed, manually increment steps so logging/stages work
+        # Only increment if this is a full step (not a partial OOM recovery batch)
+        if solver_fixed and not no_update_actor and not is_partial:
+            if hasattr(self, "total_steps"):
+                self.total_steps += 1
+        
         if self.train_guidance_model and not no_update_actor:
             guidance_info = self.train_guidance(trajectories)
             info.update(guidance_info)
@@ -652,7 +730,8 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
             gpath = path.replace('.pt', '_guidance.pt')
             torch.save({
                 'model_state_dict': self.guidance_model.state_dict(),
-                'optimizer_state_dict': getattr(self, 'guidance_optimizer', None).state_dict() if hasattr(self, 'guidance_optimizer') else None
+                'optimizer_state_dict': getattr(self, 'guidance_optimizer', None).state_dict() if hasattr(self, 'guidance_optimizer') else None,
+                'train_solver': self.train_solver
             }, gpath)
             print(f"Saved guidance model to {gpath}")
         except RuntimeError as e:
@@ -665,6 +744,7 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
                 # Save state dict directly without optimizer state
                 torch.save({
                     'model_state_dict': self.guidance_model.state_dict(),
+                    'train_solver': self.train_solver
                 }, gpath)
                 print(f"Saved guidance model only (no optimizer state) to {gpath}")
 
@@ -687,6 +767,8 @@ class RLGuidedSCoReTrainer(SCoReTrainer):
                 self.guidance_model.load_state_dict(ckpt['model_state_dict'])
                 if hasattr(self, 'guidance_optimizer') and 'optimizer_state_dict' in ckpt:
                     self.guidance_optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                if 'train_solver' in ckpt:
+                    self.train_solver = ckpt['train_solver']
                 print(f"Loaded guidance model from {gpath}")
             except RuntimeError as e:
                 print(f"Warning: Error loading guidance model: {e}")

@@ -6,6 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 from archer.algorithms.archer import ArcherTrainer
 from archer.algorithms.online_filteredbc import BCTrainer
 from archer.algorithms.score import SCoReTrainer, RLGuidedSCoReTrainer, BiLevelSCoReTrainer
+from archer.algorithms.score.trainer import dict_mean
 import wandb
 from tqdm import tqdm
 import os
@@ -85,6 +86,7 @@ def offpolicy_train_loop(env,
                          use_smart_corrections: bool = False,  
                          correction_model_path: str = None,    
                          train_guidance_model: bool = False,   
+                         train_solver: bool = True,
                          guidance_lr: float = 1e-6,            
                          guidance_model_path: str = None,      
                          guidance_kl_coef: float = 0.05,       
@@ -148,6 +150,7 @@ def offpolicy_train_loop(env,
                 guidance_lr=guidance_lr,
                 guidance_kl_coef=guidance_kl_coef,
                 train_guidance_model=train_guidance_model,
+                train_solver=train_solver,
                 lm_lr=lm_lr,
                 grad_accum_steps=grad_accum_steps,
                 max_grad_norm=max_grad_norm,
@@ -213,6 +216,7 @@ def offpolicy_train_loop(env,
             guidance_lr=guidance_lr,
             guidance_kl_coef=guidance_kl_coef,
             train_guidance_model=train_guidance_model,
+            train_solver=train_solver,
             value_model_name=value_model_name,
             value_lr=value_lr,
             value_coef=value_coef,
@@ -370,7 +374,8 @@ def offpolicy_train_loop(env,
                 
                 # For SCoRe: on-policy update with the freshly collected trajectories
                 try:
-                    _ = trainer.update(score_trajectories, no_update_actor=(i < warmup_iter))
+                    train_info = trainer.update(score_trajectories, no_update_actor=(i < warmup_iter))
+                    info.update(train_info)
                 except RuntimeError as e:
                     if "out of memory" in str(e):
                         # Clear CUDA cache
@@ -378,10 +383,17 @@ def offpolicy_train_loop(env,
                             torch.cuda.empty_cache()
                         print(f"OOM error, trying with smaller batches")
                         # Try with smaller batches
-                        batch_size = 4
-                        for idx in range(0, len(score_trajectories), batch_size):
-                            batch = score_trajectories[idx:idx+batch_size]
-                            _ = trainer.update(batch, no_update_actor=(i < warmup_iter))
+                        batch_size_small = 4
+                        all_train_infos = []
+                        for idx in range(0, len(score_trajectories), batch_size_small):
+                            batch = score_trajectories[idx:idx+batch_size_small]
+                            # Pass is_partial=True to prevent double-counting steps
+                            train_info = trainer.update(batch, no_update_actor=(i < warmup_iter), is_partial=True)
+                            all_train_infos.append(train_info)
+                        
+                        # Aggregate metrics across small batches
+                        if all_train_infos:
+                            info.update(dict_mean(all_train_infos))
                     else:
                         raise e
                 
